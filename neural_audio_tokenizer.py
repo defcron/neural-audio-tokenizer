@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help from Tuesday (custom GPT-5) and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-09-15
+neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help from custom GPT Tuesday, GPT-5 Auto, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-09-16
 ==========================
 
 A research-grade neural audio tokenization system optimized for LLM consumption,
@@ -496,42 +496,234 @@ class MultiScaleTemporalEncoder(nn.Module):
 # ============================================================================
 
 class NDJSONStreamer:
-    """NDJSON streaming protocol for LLM-friendly audio tokenization."""
+    """Enhanced NDJSON streaming protocol for LLM-friendly audio tokenization."""
     
-    def __init__(self, sample_rate: int, hop_length: int):
+    def __init__(self, sample_rate: int, hop_length: int, model_id: str = "tims-ears-v1.0", 
+                 codebook_size: int = 1024, num_semantic_layers: int = 4, num_acoustic_layers: int = 4,
+                 rle_mode: bool = False, per_layer_encoding: Optional[Dict[str, str]] = None,
+                 keyframe_interval_seconds: float = 5.0, audio_sha256: Optional[str] = None):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.hop_ms = (hop_length / sample_rate) * 1000.0
-    
-    def create_header(self, metadata: Dict = None) -> str:
-        """Create NDJSON header line."""
+        self.frames_per_second = sample_rate / hop_length
+        self.frame_duration_ms = 1000.0 / self.frames_per_second
+        self.model_id = model_id
+        self.codebook_size = codebook_size
+        self.num_semantic_layers = num_semantic_layers
+        self.num_acoustic_layers = num_acoustic_layers
+        self.rle_mode = rle_mode
+        self.per_layer_encoding = per_layer_encoding or {}
+        self.keyframe_interval_seconds = keyframe_interval_seconds
+        self.audio_sha256 = audio_sha256
+        
+        # RLE state for duration aggregation
+        self.buffered_event = None
+        self.last_frame_index = -1
+        
+    def create_header(self, duration_seconds: float = None, metadata: Dict = None, 
+                     include_legend: bool = True) -> str:
+        """Create enhanced NDJSON header with full format specification."""
+        layers = []
+        
+        # Semantic layers with encoding preferences
+        for i in range(self.num_semantic_layers):
+            layer_name = f"S{i}"
+            encoding = self.per_layer_encoding.get(layer_name, "rle" if self.rle_mode else "dense")
+            layers.append({
+                "name": layer_name,
+                "type": "semantic", 
+                "vocab": self.codebook_size,
+                "encoding": encoding
+            })
+        
+        # Acoustic layers with encoding preferences
+        for i in range(self.num_acoustic_layers):
+            layer_name = f"A{i}"
+            encoding = self.per_layer_encoding.get(layer_name, "dense")  # A-layers default to dense
+            layers.append({
+                "name": layer_name,
+                "type": "acoustic",
+                "vocab": self.codebook_size,
+                "encoding": encoding
+            })
+        
         header = {
-            "type": "header",
+            "event": "header",
+            "format_version": "1.0",
+            "schema": "lam_audio_tokens",
+            "model_id": self.model_id,
+            "codebook_id": f"{self.model_id}-cb-{self.codebook_size}",
             "sr": self.sample_rate,
+            "hop": self.hop_length,
             "hop_ms": round(self.hop_ms, 3),
-            "meta": metadata or {}
+            "frames_per_second": round(self.frames_per_second, 3),
+            "encoding_mode": "rle" if self.rle_mode else "dense",
+            "time_units": "ms",
+            "start_ts": 0.0,
+            "layers": layers
         }
+        
+        if include_legend:
+            header["legend"] = "S* encodes slower, scene/gesture level; A* encodes timbre/texture/transient detail; S0 < S1 < S2 < S3 in timescale"
+            
+        if duration_seconds is not None:
+            header["duration_seconds"] = round(duration_seconds, 3)
+            
+        if self.audio_sha256:
+            header["audio_sha256"] = self.audio_sha256
+            
+        if metadata:
+            header["metadata"] = metadata
+            
         return json.dumps(header, separators=(',', ':'))
     
-    def create_frame(self, time_ms: float, semantic_tokens: List[int], 
-                    acoustic_tokens: List[int], aux_data: Dict = None) -> str:
-        """Create NDJSON frame line."""
-        frame = {
-            "t": round(time_ms, 3),
-            "sem": semantic_tokens,
-            "acc": acoustic_tokens
-        }
-        if aux_data:
-            frame["aux"] = aux_data
-        return json.dumps(frame, separators=(',', ':'))
+    def _should_use_rle_for_layer(self, layer_name: str) -> bool:
+        """Determine if a specific layer should use RLE encoding."""
+        return self.per_layer_encoding.get(layer_name, 
+            "rle" if (self.rle_mode and layer_name.startswith('S')) else "dense"
+        ) == "rle"
     
-    def create_footer(self, stats: Dict = None) -> str:
-        """Create NDJSON footer line."""
-        footer = {
-            "type": "footer",
-            "stats": stats or {}
-        }
-        return json.dumps(footer, separators=(',', ':'))
+    def _flush_buffered_event(self) -> Optional[str]:
+        """Flush any buffered RLE event and return the JSON string."""
+        if self.buffered_event is None:
+            return None
+            
+        event_json = json.dumps(self.buffered_event, separators=(',', ':'))
+        self.buffered_event = None
+        return event_json
+    
+    def create_frame(self, frame_index: int, time_ms: float, semantic_tokens: List[int], 
+                    acoustic_tokens: List[int], changed_layers: List[str] = None,
+                    is_keyframe: bool = False, aux_data: Dict = None) -> Optional[str]:
+        """Create NDJSON frame/event line with RLE aggregation and keyframe support."""
+        
+        # Defensive check for layer count consistency
+        expected_sem_layers = self.num_semantic_layers
+        expected_acc_layers = self.num_acoustic_layers
+        
+        if len(semantic_tokens) != expected_sem_layers:
+            print(f"Warning: Expected {expected_sem_layers} semantic tokens, got {len(semantic_tokens)}")
+            # Pad or truncate to expected size
+            if len(semantic_tokens) < expected_sem_layers:
+                semantic_tokens.extend([0] * (expected_sem_layers - len(semantic_tokens)))
+            else:
+                semantic_tokens = semantic_tokens[:expected_sem_layers]
+                
+        if len(acoustic_tokens) != expected_acc_layers:
+            print(f"Warning: Expected {expected_acc_layers} acoustic tokens, got {len(acoustic_tokens)}")
+            # Pad or truncate to expected size
+            if len(acoustic_tokens) < expected_acc_layers:
+                acoustic_tokens.extend([0] * (expected_acc_layers - len(acoustic_tokens)))
+            else:
+                acoustic_tokens = acoustic_tokens[:expected_acc_layers]
+        
+        # Force keyframe or dense mode
+        if is_keyframe or not self.rle_mode:
+            # Flush any buffered RLE event first
+            flushed = self._flush_buffered_event()
+            
+            # Create dense frame event
+            event = {
+                "event": "frame",
+                "fi": frame_index,
+                "ts": round(time_ms, 3),
+                "dur": round(self.frame_duration_ms, 3),
+                "S": [int(token) for token in semantic_tokens],
+                "A": [int(token) for token in acoustic_tokens]
+            }
+            
+            if is_keyframe:
+                event["is_keyframe"] = True
+                
+            if aux_data:
+                event["aux"] = aux_data
+                
+            result = json.dumps(event, separators=(',', ':'))
+            
+            # Return both flushed and current event
+            if flushed:
+                return flushed + '\n' + result
+            return result
+        
+        # RLE mode with duration aggregation
+        if changed_layers:
+            # Check if we should buffer or extend previous event
+            if self.buffered_event is not None:
+                # Extend duration of buffered event
+                frames_elapsed = frame_index - self.last_frame_index
+                additional_duration = frames_elapsed * self.frame_duration_ms
+                self.buffered_event["dur"] += additional_duration
+                
+                # Flush the buffered event
+                flushed = self._flush_buffered_event()
+            else:
+                flushed = None
+            
+            # Create new RLE tokens event
+            event = {
+                "event": "tokens",
+                "fi": frame_index,
+                "ts": round(time_ms, 3),
+                "dur": round(self.frame_duration_ms, 3)  # Initial duration
+            }
+            
+            # Add only changed layers that should use RLE
+            for layer_name in changed_layers:
+                if layer_name.startswith('S'):
+                    layer_idx = int(layer_name[1:])
+                    if layer_idx < len(semantic_tokens) and self._should_use_rle_for_layer(layer_name):
+                        event[layer_name] = int(semantic_tokens[layer_idx])
+                elif layer_name.startswith('A'):
+                    layer_idx = int(layer_name[1:])
+                    if layer_idx < len(acoustic_tokens) and self._should_use_rle_for_layer(layer_name):
+                        event[layer_name] = int(acoustic_tokens[layer_idx])
+            
+            # Also include any dense-mode layers in full
+            dense_layers_s = [int(token) for i, token in enumerate(semantic_tokens) 
+                            if not self._should_use_rle_for_layer(f"S{i}")]
+            dense_layers_a = [int(token) for i, token in enumerate(acoustic_tokens)
+                            if not self._should_use_rle_for_layer(f"A{i}")]
+            
+            if dense_layers_s:
+                event["S_dense"] = dense_layers_s
+            if dense_layers_a:
+                event["A_dense"] = dense_layers_a
+                
+            if aux_data:
+                event["aux"] = aux_data
+            
+            # Buffer this event for potential duration extension
+            self.buffered_event = event
+            self.last_frame_index = frame_index
+            
+            # Return flushed event if any
+            return flushed
+        else:
+            # No changes - just extend buffered event duration if exists
+            if self.buffered_event is not None:
+                frames_elapsed = frame_index - self.last_frame_index
+                additional_duration = frames_elapsed * self.frame_duration_ms
+                self.buffered_event["dur"] += additional_duration
+                self.last_frame_index = frame_index
+            
+            return None  # No event to emit
+    
+    def create_end_marker(self, stats: Dict = None) -> str:
+        """Create end-of-stream marker, flushing any buffered events."""
+        lines = []
+        
+        # Flush any remaining buffered event
+        flushed = self._flush_buffered_event()
+        if flushed:
+            lines.append(flushed)
+        
+        # Create end event
+        end_event = {"event": "end"}
+        if stats:
+            end_event["stats"] = stats
+        lines.append(json.dumps(end_event, separators=(',', ':')))
+        
+        return '\n'.join(lines) if len(lines) > 1 else lines[0]
 
 
 # ============================================================================
@@ -551,9 +743,12 @@ class TokenBudgetMetrics:
 
 
 class TokenBudgetMeter:
-    """Track token budget and throughput for LLM consumption."""
+    """Track token budget and throughput for LLM consumption with accurate timebase calculation."""
     
-    def __init__(self):
+    def __init__(self, sample_rate: int = 22050, hop_length: int = 512):
+        self.sample_rate = sample_rate
+        self.hop_length = hop_length
+        self.frames_per_second = sample_rate / hop_length  # Accurate FPS calculation
         self.reset()
     
     def reset(self):
@@ -572,16 +767,20 @@ class TokenBudgetMeter:
         self.acoustic_tokens += acc_tokens
     
     def get_metrics(self) -> TokenBudgetMetrics:
-        """Get current metrics."""
+        """Get current metrics with accurate calculations."""
         elapsed = time.time() - self.start_time
         total_tokens = self.semantic_tokens + self.acoustic_tokens
+        
+        # Calculate accurate frames_per_second based on actual frame count and audio duration
+        audio_duration = self.total_samples / self.sample_rate if self.sample_rate > 0 else elapsed
+        actual_fps = self.total_frames / max(audio_duration, 1e-6)
         
         return TokenBudgetMetrics(
             total_tokens=total_tokens,
             semantic_tokens=self.semantic_tokens,
             acoustic_tokens=self.acoustic_tokens,
             tokens_per_second=total_tokens / max(elapsed, 1e-6),
-            frames_per_second=self.total_frames / max(elapsed, 1e-6),
+            frames_per_second=actual_fps,  # Use actual FPS from data
             compression_ratio=self.total_samples / max(total_tokens, 1),
             processing_time=elapsed
         )
@@ -1632,13 +1831,39 @@ class TokenFormatter:
 
 
 class StreamingProtocol:
-    """Enhanced streaming protocol with both chunked and NDJSON formats."""
+    """Enhanced streaming protocol with optimized RLE, keyframes, and per-layer encoding."""
     
     def __init__(self, chunk_size: int = 8192, overlap: int = 1024, 
-                 sample_rate: int = 22050, hop_length: int = 512):
+                 sample_rate: int = 22050, hop_length: int = 512,
+                 rle_mode: bool = False, model_id: str = "tims-ears-v1.0",
+                 codebook_size: int = 1024, num_semantic_layers: int = 4, 
+                 num_acoustic_layers: int = 4, per_layer_encoding: Optional[Dict[str, str]] = None,
+                 keyframe_interval_seconds: float = 5.0, audio_sha256: Optional[str] = None,
+                 include_legend: bool = True):
         self.chunk_size = chunk_size
         self.overlap = overlap
-        self.ndjson_streamer = NDJSONStreamer(sample_rate, hop_length)
+        self.rle_mode = rle_mode
+        self.keyframe_interval_seconds = keyframe_interval_seconds
+        
+        # Set up per-layer encoding with smart defaults
+        if per_layer_encoding is None and rle_mode:
+            # Default: RLE for semantic layers, dense for acoustic layers
+            per_layer_encoding = {}
+            for i in range(num_semantic_layers):
+                per_layer_encoding[f"S{i}"] = "rle"
+            for i in range(num_acoustic_layers):
+                per_layer_encoding[f"A{i}"] = "dense"
+        
+        self.ndjson_streamer = NDJSONStreamer(
+            sample_rate, hop_length, model_id, codebook_size,
+            num_semantic_layers, num_acoustic_layers, rle_mode,
+            per_layer_encoding, keyframe_interval_seconds, audio_sha256
+        )
+        
+        # Track previous tokens for RLE change detection
+        self.prev_semantic_tokens = None
+        self.prev_acoustic_tokens = None
+        self.last_keyframe_time = 0.0
         
     def create_stream_header(self, sample_rate: int, total_samples: int, metadata: Dict = None) -> str:
         """Create stream header with metadata."""
@@ -1678,26 +1903,73 @@ class StreamingProtocol:
         
         return f"===STREAM_FOOTER===\n{json.dumps(footer)}\n===STREAM_COMPLETE==="
     
+    def _detect_changed_layers(self, semantic_tokens: List[int], acoustic_tokens: List[int]) -> List[str]:
+        """Detect which layers changed from previous frame (for RLE mode)."""
+        changed_layers = []
+        
+        # Compare semantic layers
+        if self.prev_semantic_tokens is not None:
+            for i, (curr, prev) in enumerate(zip(semantic_tokens, self.prev_semantic_tokens)):
+                if curr != prev:
+                    changed_layers.append(f"S{i}")
+        else:
+            # First frame - all layers are "changed"
+            changed_layers.extend([f"S{i}" for i in range(len(semantic_tokens))])
+            
+        # Compare acoustic layers
+        if self.prev_acoustic_tokens is not None:
+            for i, (curr, prev) in enumerate(zip(acoustic_tokens, self.prev_acoustic_tokens)):
+                if curr != prev:
+                    changed_layers.append(f"A{i}")
+        else:
+            # First frame - all layers are "changed" 
+            changed_layers.extend([f"A{i}" for i in range(len(acoustic_tokens))])
+            
+        # Update previous tokens
+        self.prev_semantic_tokens = semantic_tokens[:]
+        self.prev_acoustic_tokens = acoustic_tokens[:]
+        
+        return changed_layers
+    
+    def _should_emit_keyframe(self, time_seconds: float) -> bool:
+        """Determine if we should emit a keyframe at this time."""
+        if not self.rle_mode:
+            return False
+        
+        if time_seconds - self.last_keyframe_time >= self.keyframe_interval_seconds:
+            self.last_keyframe_time = time_seconds
+            return True
+        return False
+    
     def create_ndjson_stream(self, tokens: Dict, metadata: Dict = None, 
-                           processing_stats: Dict = None) -> str:
-        """Create NDJSON stream format (LAM v0.1)."""
+                           processing_stats: Dict = None, duration_seconds: float = None,
+                           include_legend: bool = True) -> str:
+        """Create optimized NDJSON stream with RLE aggregation, keyframes, and per-layer encoding."""
         lines = []
         
-        # Header
-        lines.append(self.ndjson_streamer.create_header(metadata))
+        # Enhanced header with duration
+        lines.append(self.ndjson_streamer.create_header(duration_seconds, metadata, include_legend))
         
-        # Frame data
+        # Frame data with accurate timebase and optimizations
         semantic_codes = tokens['semantic_codes']
         acoustic_codes = tokens['acoustic_codes']
         
         if semantic_codes and acoustic_codes:
-            # Determine frame count
+            # Determine frame count from actual token arrays
             num_frames = min(
                 min(codes.shape[-1] for codes in semantic_codes),
                 min(codes.shape[-1] for codes in acoustic_codes)
             )
             
-            hop_ms = self.ndjson_streamer.hop_ms
+            # Use accurate frame timing
+            frames_per_second = self.ndjson_streamer.frames_per_second
+            
+            # Reset state for new stream
+            self.prev_semantic_tokens = None
+            self.prev_acoustic_tokens = None
+            self.last_keyframe_time = 0.0
+            self.ndjson_streamer.buffered_event = None
+            self.ndjson_streamer.last_frame_index = -1
             
             for frame_idx in range(num_frames):
                 # Extract tokens for this frame
@@ -1706,11 +1978,36 @@ class StreamingProtocol:
                 acc_tokens = [int(codes[0, frame_idx]) for codes in acoustic_codes 
                             if frame_idx < codes.shape[-1]]
                 
-                time_ms = frame_idx * hop_ms
-                lines.append(self.ndjson_streamer.create_frame(time_ms, sem_tokens, acc_tokens))
+                time_ms = frame_idx * self.ndjson_streamer.frame_duration_ms
+                time_seconds = time_ms / 1000.0
+                
+                # Check for keyframe
+                is_keyframe = self._should_emit_keyframe(time_seconds)
+                
+                if self.rle_mode and not is_keyframe:
+                    # RLE mode: detect changes and use aggregation
+                    changed_layers = self._detect_changed_layers(sem_tokens, acc_tokens)
+                    
+                    frame_output = self.ndjson_streamer.create_frame(
+                        frame_idx, time_ms, sem_tokens, acc_tokens, 
+                        changed_layers=changed_layers, is_keyframe=False
+                    )
+                else:
+                    # Dense mode or keyframe: emit full frame
+                    frame_output = self.ndjson_streamer.create_frame(
+                        frame_idx, time_ms, sem_tokens, acc_tokens,
+                        is_keyframe=is_keyframe
+                    )
+                    # Update change tracking for dense frames too
+                    if self.rle_mode:
+                        self._detect_changed_layers(sem_tokens, acc_tokens)
+                
+                if frame_output:
+                    lines.append(frame_output)
         
-        # Footer
-        lines.append(self.ndjson_streamer.create_footer(processing_stats))
+        # End marker with final flush and stats
+        end_output = self.ndjson_streamer.create_end_marker(processing_stats)
+        lines.append(end_output)
         
         return "\n".join(lines)
 
@@ -1727,12 +2024,22 @@ class AudioTokenizationPipeline:
                  model_config: Optional[Dict] = None,
                  device: str = "auto",
                  enable_compat_fallback: bool = True,
-                 resample_rate: Optional[int] = None):
+                 resample_rate: Optional[int] = None,
+                 rle_mode: bool = False,
+                 model_id: str = "tims-ears-v1.0",
+                 per_layer_encoding: Optional[Dict[str, str]] = None,
+                 keyframe_interval_seconds: float = 5.0,
+                 include_legend: bool = True):
         self.original_sample_rate = sample_rate  # Keep track of what was requested
         self.resample_rate = resample_rate  # None means no resampling
         self.sample_rate = resample_rate if resample_rate is not None else sample_rate
         self.model_config = model_config or {}
         self.enable_compat_fallback = enable_compat_fallback
+        self.rle_mode = rle_mode
+        self.model_id = model_id
+        self.per_layer_encoding = per_layer_encoding
+        self.keyframe_interval_seconds = keyframe_interval_seconds
+        self.include_legend = include_legend
         
         # Device selection with improved fallback handling
         if device == "auto":
@@ -1764,19 +2071,43 @@ class AudioTokenizationPipeline:
         # Token formatter
         self.formatter = TokenFormatter()
         
-        # Streaming protocol with hop length
-        hop_length = self.model_config.get('hop_length', 512) 
+        # Enhanced streaming protocol with hop length and model info
+        hop_length = self.model_config.get('hop_length', 512)
+        codebook_size = self.model_config.get('codebook_size', 1024)
+        num_quantizers = self.model_config.get('num_quantizers', 8)
+        
+        # Generate audio SHA256 if available
+        self.audio_sha256 = None  # Will be set per file
+        
         self.streaming = StreamingProtocol(
             sample_rate=sample_rate, 
-            hop_length=hop_length
+            hop_length=hop_length,
+            rle_mode=rle_mode,
+            model_id=model_id,
+            codebook_size=codebook_size,
+            num_semantic_layers=num_quantizers//2,
+            num_acoustic_layers=num_quantizers//2,
+            per_layer_encoding=per_layer_encoding,
+            keyframe_interval_seconds=keyframe_interval_seconds,
+            audio_sha256=self.audio_sha256,
+            include_legend=include_legend
         )
         
-        # Token budget meter
-        self.budget_meter = TokenBudgetMeter()
+        # Token budget meter with accurate timing
+        self.budget_meter = TokenBudgetMeter(sample_rate, hop_length)
         
         print(f"Initialized Neural Audio Tokenizer on {self.device}")
+        print(f"Model ID: {model_id}, RLE Mode: {rle_mode}")
+        if per_layer_encoding:
+            print(f"Per-layer encoding: {per_layer_encoding}")
         if self.compat_mode:
             print("Running in compatibility mode")
+    
+    def _generate_audio_sha256(self, audio: np.ndarray) -> str:
+        """Generate SHA256 hash of audio data for integrity checking."""
+        import hashlib
+        audio_bytes = audio.astype(np.float32).tobytes()
+        return hashlib.sha256(audio_bytes).hexdigest()
         
     def _check_dependencies(self) -> bool:
         """Check if all required dependencies are available."""
@@ -1914,6 +2245,12 @@ class AudioTokenizationPipeline:
         audio, sr = self.load_audio(file_path)
         print(f"Loaded audio: {len(audio)} samples, {sr} Hz, {len(audio)/sr:.2f}s")
         
+        # Generate audio integrity hash
+        audio_hash = self._generate_audio_sha256(audio)
+        
+        # Update streaming protocol with audio hash
+        self.streaming.ndjson_streamer.audio_sha256 = audio_hash
+        
         # Convert to tensor and ensure on correct device
         audio_tensor = torch.from_numpy(audio).float().unsqueeze(0).to(self.device)
         
@@ -1957,7 +2294,9 @@ class AudioTokenizationPipeline:
                 "sample_rate": sr,
                 "duration": len(audio) / sr,
                 "processing_time": time.time() - start_time,
-                "budget_metrics": asdict(budget_metrics)
+                "budget_metrics": asdict(budget_metrics),
+                "audio_sha256": audio_hash,
+                "model_id": self.model_id
             }
         )
         
@@ -1980,12 +2319,16 @@ class AudioTokenizationPipeline:
                 metadata={
                     "file_path": file_path,
                     "sample_rate": sr,
-                    "duration": len(audio) / sr
+                    "duration": len(audio) / sr,
+                    "audio_sha256": audio_hash,
+                    "model_id": self.model_id
                 },
                 processing_stats={
                     **asdict(metrics),
                     **asdict(budget_metrics)
-                }
+                },
+                duration_seconds=len(audio) / sr,
+                include_legend=self.include_legend
             )
         
         total_time = time.time() - start_time
@@ -2010,7 +2353,9 @@ class AudioTokenizationPipeline:
                 "sample_rate": sr,
                 "duration": len(audio) / sr,
                 "device": str(self.device),
-                "compat_mode": self.compat_mode
+                "compat_mode": self.compat_mode,
+                "audio_sha256": audio_hash,
+                "model_id": self.model_id
             }
         }
     
@@ -2045,10 +2390,26 @@ class AudioTokenizationPipeline:
                     with open(Path(output_dir) / f"{base_name}_stream.txt", 'w') as f:
                         f.write(result['streaming_output'])
                 
-                # NDJSON format
-                if result['ndjson_output']:
-                    with open(Path(output_dir) / f"{base_name}_ndjson.txt", 'w') as f:
-                        f.write(result['ndjson_output'])
+                # Enhanced NDJSON format (always generate for batch processing)
+                ndjson_output = self.streaming.create_ndjson_stream(
+                    result['tokenizer_result'],
+                    metadata={
+                        "file_path": file_path,
+                        "sample_rate": result['metadata']['sample_rate'],
+                        "duration": result['metadata']['duration'],
+                        "audio_sha256": result['metadata'].get('audio_sha256'),
+                        "model_id": result['metadata'].get('model_id', self.model_id)
+                    },
+                    processing_stats={
+                        **asdict(result['metrics']),
+                        **asdict(result['budget_metrics'])
+                    },
+                    duration_seconds=result['metadata']['duration'],
+                    include_legend=self.include_legend
+                )
+                
+                with open(Path(output_dir) / f"{base_name}_tokens.ndjson", 'w') as f:
+                    f.write(ndjson_output)
                 
                 # Reconstructed audio
                 if result['reconstructed_audio'] is not None:
@@ -2132,7 +2493,19 @@ Examples:
                        default='hierarchical', help='Token format (default: hierarchical)')
     parser.add_argument('--streaming', action='store_true', help='Use streaming protocol output')
     parser.add_argument('--ndjson-streaming', action='store_true', help='Use NDJSON streaming (LAM v0.1)')
+    parser.add_argument('--rle', action='store_true', help='Use RLE (run-length encoding) mode for more efficient NDJSON streaming')
     parser.add_argument('--chunk-size', type=int, default=8192, help='Streaming chunk size')
+    parser.add_argument('--model-id', default='tims-ears-v1.0', help='Model identifier for token semantics stability (default: tims-ears-v1.0)')
+    
+    # Advanced RLE and encoding options
+    parser.add_argument('--keyframe-interval', type=float, default=5.0, help='Keyframe interval in seconds for RLE mode (default: 5.0)')
+    parser.add_argument('--encoding', help='Per-layer encoding specification, e.g., "S0=rle,S1=rle,A0=dense,A1=dense" or "S=rle,A=dense"')
+    parser.add_argument('--rle-semantic', action='store_true', help='Force RLE encoding for all semantic layers')
+    parser.add_argument('--dense-acoustic', action='store_true', help='Force dense encoding for all acoustic layers (default in RLE mode)')
+    parser.add_argument('--no-legend', action='store_true', help='Omit legend from NDJSON header to save tokens')
+    
+    # Backward compatibility  
+    parser.add_argument('--ndjson-compat', action='store_true', help='Use legacy NDJSON format for backward compatibility')
     
     # Model configuration - FIXED: Added proper --resample argument
     parser.add_argument('--sample-rate', type=int, default=22050, help='Target sample rate (deprecated, use --resample)')
@@ -2194,13 +2567,55 @@ Examples:
         else:
             resample_rate = args.resample
     
+    # Parse per-layer encoding specification
+    per_layer_encoding = None
+    if args.encoding:
+        per_layer_encoding = {}
+        
+        # Handle shorthand notation like "S=rle,A=dense"
+        if args.encoding in ["S=rle,A=dense", "S=dense,A=rle"]:
+            for i in range(model_config.get('num_quantizers', 8) // 2):
+                if "S=rle" in args.encoding:
+                    per_layer_encoding[f"S{i}"] = "rle"
+                if "A=dense" in args.encoding:
+                    per_layer_encoding[f"A{i}"] = "dense"
+                if "S=dense" in args.encoding:
+                    per_layer_encoding[f"S{i}"] = "dense"
+                if "A=rle" in args.encoding:
+                    per_layer_encoding[f"A{i}"] = "rle"
+        else:
+            # Handle explicit layer specification like "S0=rle,S1=rle,A0=dense,A1=dense"
+            for spec in args.encoding.split(','):
+                if '=' in spec:
+                    layer_name, encoding_type = spec.split('=')
+                    if encoding_type in ['rle', 'dense']:
+                        per_layer_encoding[layer_name.strip()] = encoding_type.strip()
+    
+    # Apply CLI flag overrides
+    if args.rle_semantic or args.dense_acoustic:
+        if per_layer_encoding is None:
+            per_layer_encoding = {}
+        
+        num_quantizers = model_config.get('num_quantizers', 8)
+        if args.rle_semantic:
+            for i in range(num_quantizers // 2):
+                per_layer_encoding[f"S{i}"] = "rle"
+        if args.dense_acoustic:
+            for i in range(num_quantizers // 2):
+                per_layer_encoding[f"A{i}"] = "dense"
+    
     # Initialize pipeline
     pipeline = AudioTokenizationPipeline(
         sample_rate=args.sample_rate,  # Keep for compatibility
         model_config=model_config,
         device=args.device,
         enable_compat_fallback=args.compat_fallback,
-        resample_rate=resample_rate
+        resample_rate=resample_rate,
+        rle_mode=args.rle,
+        model_id=args.model_id,
+        per_layer_encoding=per_layer_encoding,
+        keyframe_interval_seconds=args.keyframe_interval,
+        include_legend=not args.no_legend
     )
     
     # Get input files
