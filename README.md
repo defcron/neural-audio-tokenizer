@@ -1,2 +1,2 @@
 # neural-audio-tokenizer
-Tim's Ears - Music and sound reasoning data for LLMs to hear audio via tokens and data files generated from processing any types of files
+Tim's Ears - Music and sound reasoning data output for LLMs to hear and be able to discuss input audio (or arbitrary bytes assumed as being audio), via tokens and data files generated from processing any types of files. Provides an NDJSON token stream for processing and analysis by LLMs which haven't been trained on or finetuned for understanding of the tokens or the stream format. Experimental.
