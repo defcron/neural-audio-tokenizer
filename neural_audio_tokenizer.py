@@ -788,6 +788,127 @@ def _extract_encodec_codebook_vectors(encodec_model):
     return cat
 
 
+def _extract_encodec_codebook_vectors_with_type(encodec_model, extraction_type='semantic'):
+    """
+    Extract codebook embedding vectors from a HuggingFace Encodec model with type-specific selection.
+    
+    This function improves upon the basic _extract_encodec_codebook_vectors by using different
+    portions/patterns of the codebooks for semantic vs acoustic initialization, similar to how
+    MERT uses different layer ranges for better token diversity.
+    
+    Args:
+        encodec_model: The Encodec model instance
+        extraction_type: 'semantic' (for high-level structure) or 'acoustic' (for low-level details)
+    
+    Returns:
+        np.ndarray of shape [N, D] where rows are code vectors specialized for the given type.
+    
+    Raises:
+        RuntimeError if no suitable matrices are found.
+    """
+    import numpy as _np
+    import torch as _torch
+    from torch import nn as _nn
+
+    vectors = []
+    all_vectors = []  # Keep track of all available vectors for smart selection
+
+    # First, collect ALL available codebook vectors like the original function
+    try:
+        for name, p in encodec_model.named_parameters():
+            if isinstance(p, _torch.Tensor) and p.dim() == 2:
+                lname = name.lower()
+                if any(k in lname for k in ["codebook", "embed", "embedding"]):
+                    vector_data = p.detach().cpu().numpy()
+                    all_vectors.append({'name': name, 'data': vector_data})
+
+        for name, b in encodec_model.named_buffers():
+            if isinstance(b, _torch.Tensor) and b.dim() == 2:
+                lname = name.lower()
+                if any(k in lname for k in ["codebook", "embed", "embedding"]):
+                    vector_data = b.detach().cpu().numpy()
+                    all_vectors.append({'name': name, 'data': vector_data})
+    except Exception:
+        pass
+
+    # Fallback: scan modules for attributes
+    if not all_vectors:
+        try:
+            for i, m in enumerate(encodec_model.modules()):
+                for attr in ["codebook", "embed", "embedding", "_codebook"]:
+                    if hasattr(m, attr):
+                        obj = getattr(m, attr)
+                        try:
+                            if isinstance(obj, _torch.Tensor) and obj.dim() == 2:
+                                vector_data = obj.detach().cpu().numpy()
+                                all_vectors.append({'name': f'module_{i}_{attr}', 'data': vector_data})
+                            elif isinstance(obj, _nn.Embedding):
+                                vector_data = obj.weight.detach().cpu().numpy()
+                                all_vectors.append({'name': f'module_{i}_{attr}_weight', 'data': vector_data})
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
+    if not all_vectors:
+        raise RuntimeError("No Encodec codebook embeddings found; cannot seed from codebooks")
+
+    # Now apply type-specific selection strategy (inspired by MERT's layer-based approach)
+    print(f"  Found {len(all_vectors)} codebook matrices, selecting subset for {extraction_type}")
+    
+    if extraction_type == 'semantic':
+        # For semantic: prefer later/higher-level patterns
+        # Strategy: Use vectors from the latter half of available codebooks + larger matrices
+        print(f"  Using SEMANTIC strategy: selecting latter-half matrices for high-level structure")
+        
+        # Sort by name (often correlates with model depth) and prefer latter half
+        sorted_vectors = sorted(all_vectors, key=lambda x: x['name'])
+        start_idx = len(sorted_vectors) // 2
+        if start_idx >= len(sorted_vectors):  # Ensure we get at least one matrix
+            start_idx = max(0, len(sorted_vectors) - 1)
+        selected_vectors = sorted_vectors[start_idx:]
+        
+        # Also prefer larger matrices (often contain more structured information)
+        selected_vectors.sort(key=lambda x: x['data'].shape[0], reverse=True)
+        
+    elif extraction_type == 'acoustic':
+        # For acoustic: prefer earlier/lower-level patterns
+        # Strategy: Use vectors from the first half of available codebooks + focus on spectral diversity
+        print(f"  Using ACOUSTIC strategy: selecting first-half matrices for low-level texture")
+        
+        # Sort by name and prefer first half
+        sorted_vectors = sorted(all_vectors, key=lambda x: x['name'])
+        end_idx = len(sorted_vectors) // 2
+        if end_idx == 0:  # Ensure we get at least one matrix
+            end_idx = 1
+        selected_vectors = sorted_vectors[:end_idx]
+        
+        # For acoustic, we may want different sampling patterns - mix matrix sizes
+        selected_vectors.sort(key=lambda x: x['data'].shape[1])  # Sort by feature dimension
+        
+    else:
+        # Fallback to all vectors (original behavior)
+        selected_vectors = all_vectors
+
+    # Extract the actual vectors from selected matrices
+    for vec_info in selected_vectors:
+        vectors.append(vec_info['data'])
+    
+    if not vectors:
+        # Emergency fallback: use all available vectors 
+        vectors = [v['data'] for v in all_vectors]
+        print(f"  WARNING: No vectors selected for {extraction_type}, falling back to all available vectors")
+    
+    print(f"  Selected {len(vectors)} matrices for {extraction_type} initialization")
+
+    try:
+        cat = _np.concatenate([v.reshape(-1, v.shape[-1]) for v in vectors], axis=0)
+    except Exception as e:
+        raise RuntimeError(f"Failed to concatenate Encodec codebook matrices for {extraction_type}: {e}")
+
+    return cat
+
+
 # ============================================================================
 # MERT codebook extraction helper (for music-optimized quantizer initialization)
 # ============================================================================
@@ -2738,6 +2859,10 @@ class NeuralAudioTokenizer(nn.Module):
         Encodec's learned wisdom.  Once the codebooks are initialized and
         cached, they will be loaded on subsequent runs to ensure stability.
 
+        IMPROVED v0.1.6: Now uses type-specific codebook extraction similar to MERT approach.
+        Different portions of Encodec codebooks are used for semantic vs acoustic quantizers
+        to achieve better token diversity, rather than just using different random seeds.
+
         NOTE: This method is now considered legacy. EnCodec is optimized for speech,
         not music. Use --codebook-init=mert for music-specific tokenization.
         """
@@ -2769,31 +2894,36 @@ class NeuralAudioTokenizer(nn.Module):
                     print(f"  Semantic cache key: {semantic_cache_key}")
                     print(f"  Acoustic cache key: {acoustic_cache_key}")
             # Perform one-time initialization from Encodec weight matrices
-            # Seed from Encodec codebook embeddings (no k-means) to derive centroids
+            # IMPROVED: Use type-specific codebook extraction for better diversity (similar to MERT approach)
             encodec_model = getattr(self.encodec_bridge, 'encodec', None)
             if encodec_model is None:
                 raise RuntimeError("Encodec model is not loaded; cannot initialize codebooks")
-            encodec_codebook_vectors = _extract_encodec_codebook_vectors(encodec_model)
-            # Initialize semantic quantizer from encodec weights
-            # Use different random seeds for semantic vs acoustic to ensure diversity
+            
+            # Extract DIFFERENT codebook vectors for semantic vs acoustic (key improvement!)
+            print("  Extracting SEMANTIC-specific codebook vectors for high-level structure...")
+            semantic_codebook_vectors = _extract_encodec_codebook_vectors_with_type(encodec_model, 'semantic')
+            
+            print("  Extracting ACOUSTIC-specific codebook vectors for low-level texture...")
+            acoustic_codebook_vectors = _extract_encodec_codebook_vectors_with_type(encodec_model, 'acoustic')
+            
+            # Initialize semantic quantizer from semantic-specific encodec weights
             self.semantic_quantizer.initialize_from_encodec_weights(
                 encodec_model,
                 cache_dir=self.codebook_cache_dir if self.enable_codebook_cache else None,
                 cache_key=semantic_cache_key,
                 force_reinit=self.force_reinit_codebooks,
                 use_kmeans=False,
-                pre_extracted_vectors=encodec_codebook_vectors,
+                pre_extracted_vectors=semantic_codebook_vectors,
                 layer_diversity_seed=42  # Use consistent seed for semantic layers
             )
-            # Initialize acoustic quantizer from encodec weights  
-            # Use different seed offset for acoustic layers to ensure different centroids
+            # Initialize acoustic quantizer from acoustic-specific encodec weights  
             self.acoustic_quantizer.initialize_from_encodec_weights(
                 encodec_model,
                 cache_dir=self.codebook_cache_dir if self.enable_codebook_cache else None,
                 cache_key=acoustic_cache_key,
                 force_reinit=self.force_reinit_codebooks,
                 use_kmeans=False,
-                pre_extracted_vectors=encodec_codebook_vectors,
+                pre_extracted_vectors=acoustic_codebook_vectors,
                 layer_diversity_seed=123  # Different seed for acoustic diversity
             )
             # Mark as initialized
