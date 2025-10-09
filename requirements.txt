@@ -1,0 +1,22 @@
+# Neural Audio Tokenizer - Dependencies
+# Core ML and Audio Processing Libraries
+numpy>=1.21.0
+torch>=1.12.0
+torchaudio>=0.12.0
+transformers>=4.20.0
+soundfile>=0.10.0
+librosa>=0.9.0
+
+# Scientific Computing
+scipy>=1.7.0
+scikit-learn>=1.0.0
+
+# Data Visualization (optional but recommended)
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Optional Audio Codec Support
+encodec>=0.1.0
+
+# System Monitoring (optional)
+psutil>=5.8.0
