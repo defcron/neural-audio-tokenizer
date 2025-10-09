@@ -1393,7 +1393,7 @@ class ResidualVectorQuantizer(nn.Module):
                                         cache_key: Optional[str] = None,
                                         force_reinit: bool = False,
                                         use_kmeans: bool = False,
-                                        layer_jitter: float = 1e-3,
+                                        layer_diversity_seed: int = 42,
                                         pre_extracted_vectors: Optional[np.ndarray] = None) -> None:
         """
         Initialize quantizer codebooks using Encodec's learned **codebook embeddings** only.
@@ -1404,8 +1404,8 @@ class ResidualVectorQuantizer(nn.Module):
           - Centroids are obtained via direct sampling from Encodec codebook vectors with
             projection to our input_dim using an existing linear projection if available,
             otherwise PCA, otherwise pad/truncate.
-          - The same base centroids are replicated across residual layers with a small
-            orthogonal jitter per layer to reduce collisions.
+          - Different codebook samples are used for each residual layer to maximize diversity,
+            controlled by layer_diversity_seed for reproducible but diverse initialization.
           - If pre_extracted_vectors is provided, we skip Encodec inspection and seed from it.
         """
         # Determine cache directory
@@ -1538,11 +1538,12 @@ class ResidualVectorQuantizer(nn.Module):
                     layer_centroids = features_for_init[start_idx:end_idx]
                     print(f"    Layer {i}: using unique samples [{start_idx}:{end_idx}]")
                 else:
-                    # Not enough samples - resample with different random seed
-                    np.random.seed(42 + i * 123)
+                    # Not enough samples - resample with different random seed for layer diversity
+                    layer_seed = layer_diversity_seed + i * 123
+                    np.random.seed(layer_seed)
                     idx = np.random.choice(available_samples, self.codebook_size, replace=False)
                     layer_centroids = features_for_init[idx]
-                    print(f"    Layer {i}: resampling with seed {42 + i * 123}")
+                    print(f"    Layer {i}: resampling with seed {layer_seed}")
 
                 centroids_tensor = torch.from_numpy(layer_centroids).float()
                 vq_layer.codebook.data.copy_(centroids_tensor)
@@ -1568,7 +1569,6 @@ class ResidualVectorQuantizer(nn.Module):
                                    cache_dir: Optional[Path] = None,
                                    cache_key: Optional[str] = None,
                                    force_reinit: bool = False,
-                                   layer_jitter: float = 1e-3,
                                    random_seed: int = 42,
                                    extraction_type: str = 'semantic'):
         """
@@ -1583,7 +1583,7 @@ class ResidualVectorQuantizer(nn.Module):
             cache_dir: Directory for codebook caching
             cache_key: Cache key for storing/loading codebooks
             force_reinit: Force re-initialization even if cached codebooks exist
-            layer_jitter: Small orthogonal jitter per layer to reduce collisions
+            random_seed: Base seed for generating layer-specific diversity
 
         Raises:
             ImportError: If transformers package is not available
@@ -2723,8 +2723,8 @@ class NeuralAudioTokenizer(nn.Module):
 
         elif method == "encodec":
             # Keep original EnCodec path as fallback (legacy, not recommended for music)
-            print("WARNING: Using EnCodec initialization - designed for speech, not optimal for music")
-            print("  Consider using --codebook-init=mert for better music tokenization")
+            print("WARNING: Using EnCodec initialization - optimized for speech, not music")
+            print("  RECOMMENDATION: Use --codebook-init=mert for music-specific tokenization")
             self._initialize_codebooks_from_encodec_legacy()
 
         else:
@@ -2771,12 +2771,11 @@ class NeuralAudioTokenizer(nn.Module):
             # Perform one-time initialization from Encodec weight matrices
             # Seed from Encodec codebook embeddings (no k-means) to derive centroids
             encodec_model = getattr(self.encodec_bridge, 'encodec', None)
-            encodec_codebook_vectors = _extract_encodec_codebook_vectors(encodec_model)
-            encodec_codebook_vectors = _extract_encodec_codebook_vectors(encodec_model)
-            encodec_codebook_vectors = _extract_encodec_codebook_vectors(encodec_model)
             if encodec_model is None:
                 raise RuntimeError("Encodec model is not loaded; cannot initialize codebooks")
+            encodec_codebook_vectors = _extract_encodec_codebook_vectors(encodec_model)
             # Initialize semantic quantizer from encodec weights
+            # Use different random seeds for semantic vs acoustic to ensure diversity
             self.semantic_quantizer.initialize_from_encodec_weights(
                 encodec_model,
                 cache_dir=self.codebook_cache_dir if self.enable_codebook_cache else None,
@@ -2784,9 +2783,10 @@ class NeuralAudioTokenizer(nn.Module):
                 force_reinit=self.force_reinit_codebooks,
                 use_kmeans=False,
                 pre_extracted_vectors=encodec_codebook_vectors,
-                layer_jitter=1e-3
+                layer_diversity_seed=42  # Use consistent seed for semantic layers
             )
-            # Initialize acoustic quantizer from encodec weights
+            # Initialize acoustic quantizer from encodec weights  
+            # Use different seed offset for acoustic layers to ensure different centroids
             self.acoustic_quantizer.initialize_from_encodec_weights(
                 encodec_model,
                 cache_dir=self.codebook_cache_dir if self.enable_codebook_cache else None,
@@ -2794,7 +2794,7 @@ class NeuralAudioTokenizer(nn.Module):
                 force_reinit=self.force_reinit_codebooks,
                 use_kmeans=False,
                 pre_extracted_vectors=encodec_codebook_vectors,
-                layer_jitter=1e-3
+                layer_diversity_seed=123  # Different seed for acoustic diversity
             )
             # Mark as initialized
             self.encodec_initialized = True
@@ -4737,7 +4737,7 @@ Examples:
   %(prog)s --stdin --format interleaved > tokens.txt
   echo "song.wav" | %(prog)s --stdin --batch
   %(prog)s *.wav --batch --output-dir results/ --format hierarchical
-  %(prog)s song.wav --evaluate --reconstruction --metrics metrics.json
+  %(prog)s song.wav --evaluate --metrics metrics.json
   %(prog)s song.flac --streaming --chunk-size 16384 > stream.txt
   %(prog)s song.wav --ndjson-streaming > tokens.ndjson
   %(prog)s --resample 48000 song.wav  # Resample to 48kHz
@@ -4776,41 +4776,43 @@ Examples:
     parser.add_argument('--dense-acoustic', action='store_true', help='Force dense encoding for all acoustic layers (default in RLE mode)')
     parser.add_argument('--no-legend', action='store_true', help='Omit legend from NDJSON header to save tokens')
     
-    # Reconstruction and quality options
-    parser.add_argument('--no-reconstruction', action='store_true', help='Disable audio reconstruction decoder')
-    parser.add_argument('--use-encodec', action='store_true', help='DEPRECATED: Use --codebook-init=encodec instead. Use pre-trained Encodec quantizers (requires encodec package)')
-    parser.add_argument('--encodec-model', default='facebook/encodec_24khz', help='Encodec model to use (default: facebook/encodec_24khz)')
-
-    # NEW v0.1.5: Codebook initialization method
+    # Codebook initialization options
     parser.add_argument('--codebook-init',
                        choices=['mert', 'encodec', 'random'],
                        default='mert',
                        help='Codebook initialization method (default: mert for music-optimized codebooks). '
                             'mert=music-specific (RECOMMENDED), encodec=speech-optimized (legacy), random=no pre-training')
-
-    # NEW v0.1.4: Codebook caching options
     parser.add_argument('--codebook-cache-dir', help='Directory for codebook caching (default: ~/.cache/neural_audio_tokenizer/codebooks)')
     parser.add_argument('--no-codebook-cache', action='store_true', help='Disable codebook caching (will re-run initialization every time)')
     parser.add_argument('--force-reinit-codebooks', action='store_true', help='Force re-initialization of codebooks (ignore cached files)')
+    
+    # Reconstruction and legacy options  
+    parser.add_argument('--no-reconstruction', action='store_true', help='Disable audio reconstruction decoder')
+    parser.add_argument('--use-encodec', action='store_true', help='DEPRECATED: Use --codebook-init=encodec instead. Use pre-trained Encodec quantizers (requires encodec package)')
+    parser.add_argument('--encodec-model', default='facebook/encodec_24khz', help='Encodec model to use (default: facebook/encodec_24khz)')
     
     # Deterministic mode
     parser.add_argument('--deterministic', action='store_true', help='Enable deterministic mode for reproducible results')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for deterministic mode (default: 42)')
     
-    # Model configuration - FIXED: Added proper --resample argument
-    parser.add_argument('--sample-rate', type=int, default=22050, help='Target sample rate (deprecated, use --resample)')
+    # Audio processing configuration
     parser.add_argument('--resample', type=int, nargs='?', const=22050, default=None, help='Resample audio to specified Hz (default: no resampling, --resample alone uses 22050Hz)')
     parser.add_argument('--hop-length', type=int, default=512, help='STFT hop length')
+    parser.add_argument('--n-mels', type=int, default=128, help='Number of mel bands')
+    
+    # Model architecture configuration
     parser.add_argument('--semantic-dim', type=int, default=512, help='Semantic feature dimension')
     parser.add_argument('--acoustic-dim', type=int, default=512, help='Acoustic feature dimension') 
-    parser.add_argument('--codebook-size', type=int, default=1024, help='Quantizer codebook size')
+    parser.add_argument('--codebook-size', type=int, default=4096, help='Quantizer codebook size (default: 4096 for better diversity)')
     parser.add_argument('--num-quantizers', type=int, default=8, help='Number of quantizer layers')
-    parser.add_argument('--n-mels', type=int, default=128, help='Number of mel bands')
+    
+    # Deprecated audio options
+    parser.add_argument('--sample-rate', type=int, default=22050, help='DEPRECATED: Use --resample instead. Target sample rate')
     
     # Evaluation
     parser.add_argument('--evaluate', action='store_true', help='Run comprehensive evaluation')
-    parser.add_argument('--reconstruction', action='store_true', help='Enable audio reconstruction (deprecated, use --no-reconstruction to disable)')
     parser.add_argument('--metrics', help='Output metrics to JSON file')
+    parser.add_argument('--reconstruction', action='store_true', help='DEPRECATED: Reconstruction is enabled by default, use --no-reconstruction to disable')
     parser.add_argument('--budget-report', action='store_true', help='Show detailed token budget report')
     parser.add_argument('--seq-vis', action='store_true', help='Use sequential visualization generation (slower but lower memory)')
     
@@ -4827,9 +4829,16 @@ Examples:
     
     args = parser.parse_args()
     
+    # Handle deprecated arguments with warnings
+    if args.sample_rate != 22050 and args.resample is None:
+        print("Warning: --sample-rate is deprecated. Use --resample instead for explicit audio resampling.")
+    
+    if args.reconstruction:
+        print("Warning: --reconstruction is deprecated. Reconstruction is enabled by default. Use --no-reconstruction to disable.")
+    
     # Setup
     if args.verbose:
-        print("Enhanced Neural Audio-to-LLM Tokenizer v0.1.4 - FIXED K-means clustering with progress reporting")
+        print("Enhanced Neural Audio-to-LLM Tokenizer v0.1.5 - MERT music-optimized codebook initialization")
         print(f"PyTorch: {torch.__version__}")
         print(f"Device: {args.device}")
     
