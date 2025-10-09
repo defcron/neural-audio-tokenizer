@@ -262,11 +262,11 @@ class ProgressReporter:
                     status += f" | Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s"
                     if message:
                         status += f" | {message}"
-                    print(status)
+                    logger.progress(status)
                 except Exception:
                     # Fall back to minimal status if formatting fails
                     try:
-                        print(f"  {self.operation_name}: {self.current_step}/{self.total_steps}")
+                        logger.progress(f"  {self.operation_name}: {self.current_step}/{self.total_steps}")
                     except Exception:
                         # As a last resort, silently ignore
                         pass
@@ -4442,7 +4442,7 @@ class AudioTokenizationPipeline:
         
         if deterministic:
             set_deterministic_mode(deterministic_seed)
-            print(f"Set deterministic mode with seed {deterministic_seed}")
+            logger.debug(f"Set deterministic mode with seed {deterministic_seed}")
         
         self.original_sample_rate = sample_rate  # Keep track of what was requested
         self.resample_rate = resample_rate  # None means no resampling
@@ -4474,8 +4474,8 @@ class AudioTokenizationPipeline:
         self.compat_mode = not self._check_dependencies()
         
         if self.compat_mode and enable_compat_fallback:
-            print("Warning: Falling back to compatibility mode (some features may be limited)")
-            print("Tokens generated in compatibility mode are not from trained quantizers")
+            logger.warn("Falling back to compatibility mode (some features may be limited)")
+            logger.warn("Tokens generated in compatibility mode are not from trained quantizers")
             # Create actual compat tokenizer instead of None
             self.tokenizer = self._create_compat_tokenizer()
         else:
@@ -4719,9 +4719,9 @@ class AudioTokenizationPipeline:
         FIXED v0.1.3: Now uses robust k-means clustering for proper token diversity.
         """
         
-        print(f"Processing: {file_path}")
+        logger.info(f"Processing: {file_path}")
         if self.compat_mode:
-            print("WARNING: Running in compatibility mode - tokens are exploratory only")
+            logger.warn("Running in compatibility mode - tokens are exploratory only")
         
         start_time = time.time()
         
@@ -4734,11 +4734,11 @@ class AudioTokenizationPipeline:
         try:
             # Load audio
             audio, sr = self.load_audio(file_path)
-            print(f"Loaded audio: {len(audio)} samples, {sr} Hz, {len(audio)/sr:.2f}s")
+            logger.info(f"Loaded audio: {len(audio)} samples, {sr} Hz, {len(audio)/sr:.2f}s")
             
             # FIXED v0.1.4: Memory check before processing
             if not check_memory_requirements(len(audio), sr):
-                print("WARNING: May not have sufficient memory for processing this file")
+                logger.warn("May not have sufficient memory for processing this file")
             
             # Generate audio integrity hash
             audio_hash = self._generate_audio_sha256(audio)
@@ -4866,8 +4866,8 @@ class AudioTokenizationPipeline:
                 )
             
             total_time = time.time() - start_time
-            print(f"Processing complete in {total_time:.2f}s")
-            print(f"Throughput: {budget_metrics.processing_tokens_per_second:.1f} tokens/sec, {budget_metrics.processing_frames_per_second:.1f} frames/sec")
+            logger.info(f"Processing complete in {total_time:.2f}s")
+            logger.info(f"Throughput: {budget_metrics.processing_tokens_per_second:.1f} tokens/sec, {budget_metrics.processing_frames_per_second:.1f} frames/sec")
             
             # Prepare reconstructed audio with DC removal and proper length
             reconstructed_audio_output = None
