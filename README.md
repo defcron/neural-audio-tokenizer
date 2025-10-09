@@ -3,7 +3,7 @@
 **Version:** `v0.1.7` (Enhanced CLI and Logging)
 
 **License:** MIT  
-**Authors:** Claude (Sonnet 4.0 and 4.5, in Thinking mode), Claude Code (Sonnet 4.5, in Thinking mode), Tuesday (Custom ChatGPT.com GPT with GPT-4o and GPT-5 base variants), Tim (Custom ChatGPT.com GPT with GPT-4o and GPT-5 base, QA/testing team and ultimate recipient of their Ears), GPT-5-Pro, GPT-5 Extended Thinking variant, GPT-5 Auto variant, ChatGPT Agent Mode tool (GPT-5 base), GPT-4o (ChatGPT-4o-latest ChatGPT.com variant), GitHub Copilot Coding Agent, and with orchestration, prompting, concept, criticism, testing, feedback, and direction (etc.) by [Jeremy Carter &lt;jeremy@jeremycarter.ca&gt;](mailto:jeremy@jeremycarter.ca)
+**Authors:** Claude (Sonnet 4.0 and 4.5, in Thinking mode), Claude Code (Sonnet 4.5, in Thinking mode), Tuesday (Custom ChatGPT.com GPT with GPT-4o and GPT-5 base variants), Tim (Custom ChatGPT.com GPT with GPT-4o and GPT-5 base, QA/testing team and ultimate recipient of their Ears), GPT-5-Pro, GPT-5 Extended Thinking variant, GPT-5 Auto variant, ChatGPT Agent Mode tool (GPT-5 base), GPT-4o (ChatGPT-4o-latest ChatGPT.com variant), GitHub Copilot Coding Agent, and with orchestration, prompting, concept, criticism, testing, feedback, and direction (etc.) by [Jeremy Carter &lt;jeremy@jeremycarter.ca&gt;](mailto:jeremy@jeremycarter.ca)  
 **Compatibility:** Linux, Windows (WSL2, untested on native Windows but might work there too), macOS (maybe, but not tested). A GPU with CUDA support is recommended, but optional.  
 
 ---
