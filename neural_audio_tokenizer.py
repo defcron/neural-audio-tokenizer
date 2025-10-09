@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
+
+# Version constant - single source of truth
+VERSION = "0.1.7"
+VERSION_TAG = f"v{VERSION}"
+
 """
 neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
 ==========================
-Version 0.1.7 - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
+
+Version {VERSION} - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
 
 A research-grade neural audio tokenization system optimized for LLM consumption,
 specifically designed for music understanding. Implements state-of-the-art
 hybrid tokenization strategies based on recent advances in AudioLM, MuQ,
 SoundStream, MERT, and other neural codec research.
 
-**NEW IN v0.1.7:**
+**NEW IN v0.1.x:**
 - MERT integration: Music-optimized codebook initialization using MERT (Music Understanding with Large-Scale Pre-training)
 - New --codebook-init argument: Choose between 'mert' (music-specific, RECOMMENDED), 'encodec' (speech, legacy), or 'random'
 - MERT provides 7x+ improvement in token diversity over EnCodec for musical content
 - Significantly faster initialization than k-means (uses pre-trained music codebooks)
 - Backward compatible with existing --use-encodec flag
 
-**CRITICAL FIXES v0.1.4:**
+**CRITICAL FIXES v0.1.x:**
 - FIXED: K-means error handling - logging no longer poisons success/failure determination
 - FIXED: Added progress reporting for long k-means operations
 - FIXED: Aggressive memory cleanup during k-means retry attempts  
@@ -25,7 +31,7 @@ SoundStream, MERT, and other neural codec research.
 - FIXED: Memory usage monitoring and warnings
 - FIXED: Better handling of very large feature sets
 
-**MAJOR FIXES v0.1.3:**
+**MAJOR FIXES v0.1.x:**
 - FIXED: K-means clustering now properly standardizes features before clustering
 - FIXED: Added comprehensive cluster quality validation and diversity checks
 - FIXED: Improved feature preprocessing to preserve diversity
@@ -68,6 +74,8 @@ import json
 import os
 import sys
 import time
+import signal
+import select
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Union, Any
 import warnings
@@ -77,6 +85,8 @@ import tempfile
 import gc
 import hashlib
 import pickle
+import logging
+from enum import Enum
 
 # Core numerical and ML libraries
 import numpy as np
@@ -138,7 +148,79 @@ except ImportError:
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # ============================================================================
-# FIXED v0.1.4: Progress Reporting System
+# Enhanced Logging System 
+# ============================================================================
+
+class LogLevel(Enum):
+    """Standard logging levels"""
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARN = "WARN"
+    ERROR = "ERROR"
+    
+class NeuralAudioLogger:
+    """Enhanced logging system with verbosity level control"""
+    
+    def __init__(self, level: LogLevel = LogLevel.WARN, default_mode: bool = False):
+        self.level = level
+        self.default_mode = default_mode  # True = only output NDJSON to stdout, nothing to stderr
+        self.level_hierarchy = {
+            LogLevel.DEBUG: 0,
+            LogLevel.INFO: 1,
+            LogLevel.WARN: 2,
+            LogLevel.ERROR: 3
+        }
+    
+    def _should_log(self, level: LogLevel) -> bool:
+        return self.level_hierarchy[level] >= self.level_hierarchy[self.level]
+    
+    def _log_to_stderr(self, message: str, level: LogLevel):
+        """Log to stderr unless in default mode"""
+        if not self.default_mode:
+            timestamp = time.strftime("%H:%M:%S")
+            level_str = level.value.ljust(5)
+            print(f"[{timestamp}] {level_str} {message}", file=sys.stderr)
+    
+    def debug(self, message: str):
+        if self._should_log(LogLevel.DEBUG):
+            self._log_to_stderr(f"🔍 {message}", LogLevel.DEBUG)
+    
+    def info(self, message: str):
+        if self._should_log(LogLevel.INFO):
+            self._log_to_stderr(f"ℹ️  {message}", LogLevel.INFO)
+    
+    def warn(self, message: str):
+        if self._should_log(LogLevel.WARN):
+            self._log_to_stderr(f"⚠️  {message}", LogLevel.WARN)
+    
+    def error(self, message: str):
+        if self._should_log(LogLevel.ERROR):
+            self._log_to_stderr(f"❌ {message}", LogLevel.ERROR)
+    
+    def progress(self, message: str):
+        """Progress messages - always shown unless in default mode"""
+        if not self.default_mode:
+            self._log_to_stderr(f"📊 {message}", LogLevel.INFO)
+    
+    def stdout(self, message: str):
+        """Direct stdout output - always shown"""
+        print(message, file=sys.stdout)
+
+# Global logger instance
+logger = NeuralAudioLogger()
+
+def set_log_level(level: LogLevel):
+    """Set global logging level"""
+    global logger
+    logger.level = level
+
+def set_default_mode(enabled: bool):
+    """Enable/disable default mode (NDJSON only to stdout)"""
+    global logger
+    logger.default_mode = enabled
+
+# ============================================================================
+# FIXED v0.1.x: Progress Reporting System
 # ============================================================================
 
 class ProgressReporter:
@@ -180,11 +262,11 @@ class ProgressReporter:
                     status += f" | Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s"
                     if message:
                         status += f" | {message}"
-                    print(status)
+                    logger.progress(status)
                 except Exception:
                     # Fall back to minimal status if formatting fails
                     try:
-                        print(f"  {self.operation_name}: {self.current_step}/{self.total_steps}")
+                        logger.progress(f"  {self.operation_name}: {self.current_step}/{self.total_steps}")
                     except Exception:
                         # As a last resort, silently ignore
                         pass
@@ -232,7 +314,7 @@ def check_memory_requirements(audio_length: int, sample_rate: int) -> bool:
         estimated_need_mb = audio_size_mb * 10
         
         if estimated_need_mb > available_mb * 0.8:  # Use max 80% of available memory
-            print(f"WARNING: Estimated memory need ({estimated_need_mb:.1f} MB) may exceed available ({available_mb:.1f} MB)")
+            logger.warn(f"Estimated memory need ({estimated_need_mb:.1f} MB) may exceed available ({available_mb:.1f} MB)")
             return False
         return True
     except ImportError:
@@ -301,11 +383,11 @@ def save_codebooks(quantizer: 'ResidualVectorQuantizer', cache_dir: Path,
         with open(cache_file, 'wb') as f:
             pickle.dump(codebook_data, f, protocol=pickle.HIGHEST_PROTOCOL)
         
-        print(f"Saved codebooks to: {cache_file}")
+        logger.debug(f"Saved codebooks to: {cache_file}")
         return True
         
     except Exception as e:
-        print(f"Warning: Failed to save codebooks: {e}")
+        logger.warn(f"Failed to save codebooks: {e}")
         return False
 
 
@@ -325,7 +407,7 @@ def backup_existing_codebooks(cache_file: Path) -> bool:
         
         # Verify backup was successful
         if backup_file.exists() and backup_file.stat().st_size > 0:
-            print(f"Backed up existing codebooks to: {backup_file}")
+            logger.debug(f"Backed up existing codebooks to: {backup_file}")
             return True
         else:
             print(f"Warning: Backup verification failed for {backup_file}")
@@ -2408,7 +2490,7 @@ class EncodecBridge(nn.Module):
 class NDJSONStreamer:
     """Enhanced NDJSON streaming protocol for LLM-friendly audio tokenization."""
     
-    def __init__(self, sample_rate: int, hop_length: int, model_id: str = "tims-ears-0.1.7.epoch", 
+    def __init__(self, sample_rate: int, hop_length: int, model_id: str = f"tims-ears-{VERSION}.epoch", 
                  codebook_size: int = 1024, num_semantic_layers: int = 4, num_acoustic_layers: int = 4,
                  rle_mode: bool = False, per_layer_encoding: Optional[Dict[str, str]] = None,
                  keyframe_interval_seconds: float = 5.0, audio_sha256: Optional[str] = None,
@@ -2753,8 +2835,8 @@ class NeuralAudioTokenizer(nn.Module):
                  codebook_cache_dir: Optional[Path] = None,
                  enable_codebook_cache: bool = True,
                  force_reinit_codebooks: bool = False,
-                 model_id: str = "tims-ears-0.1.7.mert",  # Updated version with MERT
-                 # NEW v0.1.7: Codebook initialization method
+                 model_id: str = f"tims-ears-{VERSION}.mert",  # Updated version with MERT
+                 # NEW v0.1.x: Codebook initialization method
                  codebook_init_method: str = "mert"):  # "mert", "encodec", or "random"
         super().__init__()
         self.sample_rate = sample_rate
@@ -2909,7 +2991,7 @@ class NeuralAudioTokenizer(nn.Module):
         Encodec's learned wisdom.  Once the codebooks are initialized and
         cached, they will be loaded on subsequent runs to ensure stability.
 
-        IMPROVED v0.1.7: Now uses type-specific codebook extraction similar to MERT approach.
+        IMPROVED v0.1.x: Now uses type-specific codebook extraction similar to MERT approach.
         Different portions of Encodec codebooks are used for semantic vs acoustic quantizers
         to achieve better token diversity, rather than just using different random seeds.
 
@@ -4126,7 +4208,7 @@ class StreamingProtocol:
     
     def __init__(self, chunk_size: int = 8192, overlap: int = 1024, 
                  sample_rate: int = 22050, hop_length: int = 512,
-                 rle_mode: bool = False, model_id: str = "tims-ears-0.1.7.epoch",  # Updated version
+                 rle_mode: bool = False, model_id: str = f"tims-ears-{VERSION}.epoch",  # Updated version
                  codebook_size: int = 1024, num_semantic_layers: int = 4, 
                  num_acoustic_layers: int = 4, per_layer_encoding: Optional[Dict[str, str]] = None,
                  keyframe_interval_seconds: float = 5.0, audio_sha256: Optional[str] = None,
@@ -4341,7 +4423,7 @@ class AudioTokenizationPipeline:
                  enable_compat_fallback: bool = True,
                  resample_rate: Optional[int] = None,
                  rle_mode: bool = False,
-                 model_id: str = "tims-ears-0.1.7.mert",  # Updated version with MERT
+                 model_id: str = f"tims-ears-{VERSION}.mert",  # Updated version with MERT
                  per_layer_encoding: Optional[Dict[str, str]] = None,
                  keyframe_interval_seconds: float = 5.0,
                  include_legend: bool = True,
@@ -4349,18 +4431,18 @@ class AudioTokenizationPipeline:
                  use_encodec_bridge: bool = False,
                  deterministic: bool = False,
                  deterministic_seed: int = 42,
-                 # NEW v0.1.2: Codebook caching options
+                 # NEW v0.1.x: Codebook caching options
                  codebook_cache_dir: Optional[str] = None,
                  enable_codebook_cache: bool = True,
                  force_reinit_codebooks: bool = False,
-                 # NEW v0.1.7: Codebook initialization method
+                 # NEW v0.1.x: Codebook initialization method
                  codebook_init_method: str = "mert",
-                 # NEW v0.1.7: Codebook size (increased for better diversity)
+                 # NEW v0.1.x: Codebook size (increased for better diversity)
                  codebook_size: int = 4096):
         
         if deterministic:
             set_deterministic_mode(deterministic_seed)
-            print(f"Set deterministic mode with seed {deterministic_seed}")
+            logger.debug(f"Set deterministic mode with seed {deterministic_seed}")
         
         self.original_sample_rate = sample_rate  # Keep track of what was requested
         self.resample_rate = resample_rate  # None means no resampling
@@ -4392,8 +4474,8 @@ class AudioTokenizationPipeline:
         self.compat_mode = not self._check_dependencies()
         
         if self.compat_mode and enable_compat_fallback:
-            print("Warning: Falling back to compatibility mode (some features may be limited)")
-            print("Tokens generated in compatibility mode are not from trained quantizers")
+            logger.warn("Falling back to compatibility mode (some features may be limited)")
+            logger.warn("Tokens generated in compatibility mode are not from trained quantizers")
             # Create actual compat tokenizer instead of None
             self.tokenizer = self._create_compat_tokenizer()
         else:
@@ -4412,7 +4494,7 @@ class AudioTokenizationPipeline:
                 enable_codebook_cache=enable_codebook_cache,
                 force_reinit_codebooks=force_reinit_codebooks,
                 model_id=model_id,
-                # NEW v0.1.7: Pass codebook initialization method
+                # NEW v0.1.x: Pass codebook initialization method
                 codebook_init_method=codebook_init_method,
                 **tokenizer_config
             ).to(self.device)
@@ -4449,7 +4531,7 @@ class AudioTokenizationPipeline:
         # Token budget meter with accurate timing
         self.budget_meter = TokenBudgetMeter(self.sample_rate, hop_length)
         
-        print(f"Initialized Neural Audio Tokenizer v0.1.7 on {self.device}")  # Updated version
+        print(f"Initialized Neural Audio Tokenizer {VERSION_TAG} on {self.device}")  # Updated version
         print(f"Model ID: {model_id}, RLE Mode: {rle_mode}")
         print(f"Reconstruction: {'enabled' if enable_reconstruction else 'disabled'}")
         print(f"Encodec Bridge: {'enabled' if use_encodec_bridge else 'disabled'}")
@@ -4637,9 +4719,9 @@ class AudioTokenizationPipeline:
         FIXED v0.1.3: Now uses robust k-means clustering for proper token diversity.
         """
         
-        print(f"Processing: {file_path}")
+        logger.info(f"Processing: {file_path}")
         if self.compat_mode:
-            print("WARNING: Running in compatibility mode - tokens are exploratory only")
+            logger.warn("Running in compatibility mode - tokens are exploratory only")
         
         start_time = time.time()
         
@@ -4652,11 +4734,11 @@ class AudioTokenizationPipeline:
         try:
             # Load audio
             audio, sr = self.load_audio(file_path)
-            print(f"Loaded audio: {len(audio)} samples, {sr} Hz, {len(audio)/sr:.2f}s")
+            logger.info(f"Loaded audio: {len(audio)} samples, {sr} Hz, {len(audio)/sr:.2f}s")
             
             # FIXED v0.1.4: Memory check before processing
             if not check_memory_requirements(len(audio), sr):
-                print("WARNING: May not have sufficient memory for processing this file")
+                logger.warn("May not have sufficient memory for processing this file")
             
             # Generate audio integrity hash
             audio_hash = self._generate_audio_sha256(audio)
@@ -4693,8 +4775,8 @@ class AudioTokenizationPipeline:
             self.budget_meter.sample_rate = sr
             self.budget_meter.update(len(audio), num_frames, num_sem_tokens, num_acc_tokens)
             
-            print(f"Generated {len(semantic_codes)} semantic layers, {len(acoustic_codes)} acoustic layers")
-            print(f"Total tokens: {num_sem_tokens + num_acc_tokens}")
+            logger.info(f"Generated {len(semantic_codes)} semantic layers, {len(acoustic_codes)} acoustic layers")
+            logger.info(f"Total tokens: {num_sem_tokens + num_acc_tokens}")
             
             # FIXED v0.1.4: Show token diversity to verify k-means worked (with enhanced output)
             if not self.compat_mode:
@@ -4705,16 +4787,16 @@ class AudioTokenizationPipeline:
                 semantic_diversity = len(torch.unique(all_semantic)) / len(all_semantic) if len(all_semantic) > 0 else 0
                 acoustic_diversity = len(torch.unique(all_acoustic)) / len(all_acoustic) if len(all_acoustic) > 0 else 0
                 
-                print(f"Token diversity - Semantic: {semantic_diversity:.3f}, Acoustic: {acoustic_diversity:.3f}")
+                logger.debug(f"Token diversity - Semantic: {semantic_diversity:.3f}, Acoustic: {acoustic_diversity:.3f}")
                 
                 # Check for potential clustering issues
                 if semantic_diversity < 0.1 or acoustic_diversity < 0.1:
-                    print("WARNING: Very low token diversity detected - k-means clustering may have failed")
+                    logger.warn("Very low token diversity detected - k-means clustering may have failed")
                 else:
-                    print("Good token diversity achieved")
+                    logger.debug("Good token diversity achieved")
             
             # Evaluation using precomputed results
-            print("Evaluating tokenization quality...")
+            logger.progress("Evaluating tokenization quality...")
             # Update evaluator sample rate to match actual loaded audio
             self.evaluator.sample_rate = sr
             metrics = self.evaluator.evaluate_tokenization(
@@ -4784,8 +4866,8 @@ class AudioTokenizationPipeline:
                 )
             
             total_time = time.time() - start_time
-            print(f"Processing complete in {total_time:.2f}s")
-            print(f"Throughput: {budget_metrics.processing_tokens_per_second:.1f} tokens/sec, {budget_metrics.processing_frames_per_second:.1f} frames/sec")
+            logger.info(f"Processing complete in {total_time:.2f}s")
+            logger.info(f"Throughput: {budget_metrics.processing_tokens_per_second:.1f} tokens/sec, {budget_metrics.processing_frames_per_second:.1f} frames/sec")
             
             # Prepare reconstructed audio with DC removal and proper length
             reconstructed_audio_output = None
@@ -4937,9 +5019,47 @@ class AudioTokenizationPipeline:
 # Command Line Interface (IMPROVED v0.1.4)
 # ============================================================================
 
+def detect_audio_format(data: bytes) -> str:
+    """Detect audio format from magic bytes"""
+    if len(data) < 12:
+        return '.raw'
+    
+    # WAV format
+    if data[:4] == b'RIFF' and data[8:12] == b'WAVE':
+        return '.wav'
+    
+    # FLAC format
+    if data[:4] == b'fLaC':
+        return '.flac'
+    
+    # MP3 format
+    if data[:3] == b'ID3' or (data[:2] == b'\xff\xfb') or (data[:2] == b'\xff\xfa'):
+        return '.mp3'
+    
+    # OGG format
+    if data[:4] == b'OggS':
+        return '.ogg'
+    
+    # M4A/MP4 format
+    if data[4:8] == b'ftyp':
+        return '.m4a'
+    
+    # Default to raw audio
+    return '.raw'
+
+def cleanup_temp_files(pipeline):
+    """Clean up temporary files created from stdin"""
+    if hasattr(pipeline, '_temp_files'):
+        for temp_file in pipeline._temp_files:
+            try:
+                os.unlink(temp_file)
+                logger.debug(f"Cleaned up temporary file: {temp_file}")
+            except Exception as e:
+                logger.warn(f"Could not clean up temporary file {temp_file}: {e}")
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Enhanced Neural Audio-to-LLM Tokenizer v0.1.7 - MERT music-optimized codebook initialization",
+        description=f"Enhanced Neural Audio-to-LLM Tokenizer {VERSION_TAG} - MERT music-optimized codebook initialization",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -4978,7 +5098,7 @@ Examples:
     parser.add_argument('--ndjson-streaming', action='store_true', help='Use NDJSON streaming (LAM v0.1)')
     parser.add_argument('--rle', action='store_true', help='Use RLE (run-length encoding) mode for more efficient NDJSON streaming')
     parser.add_argument('--chunk-size', type=int, default=8192, help='Streaming chunk size')
-    parser.add_argument('--model-id', default='tims-ears-0.1.5.mert', help='Model identifier for token semantics stability (default: tims-ears-0.1.5.mert)')
+    parser.add_argument('--model-id', default=f'tims-ears-{VERSION}.mert', help=f'Model identifier for token semantics stability (default: tims-ears-{VERSION}.mert)')
     
     # Advanced RLE and encoding options
     parser.add_argument('--keyframe-interval', type=float, default=5.0, help='Keyframe interval in seconds for RLE mode (default: 5.0)')
@@ -5036,22 +5156,48 @@ Examples:
     # Advanced options
     parser.add_argument('--model-path', help='Path to pre-trained model')
     parser.add_argument('--config', help='Model configuration JSON file')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    
+    # Logging and verbosity options
+    parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARN', 'ERROR'], default='WARN',
+                       help='Logging verbosity level (default: WARN). DEBUG=all messages, INFO=progress+warnings+errors, WARN=warnings+errors only, ERROR=errors only')
+    parser.add_argument('--verbose', '-v', action='store_true', 
+                       help='DEPRECATED: Use --log-level INFO instead. Enable verbose output')
     
     args = parser.parse_args()
     
+    # Setup logging system
+    log_level = LogLevel(args.log_level)
+    
+    # Handle deprecated verbose flag
+    if args.verbose:
+        logger.warn("--verbose flag is deprecated. Use --log-level INFO instead.")
+        log_level = LogLevel.INFO
+    
+    # Check if we should run in default mode (NDJSON streaming without extra output)
+    default_mode = (not args.all_outputs and 
+                   not args.evaluate and 
+                   not args.budget_report and
+                   not args.verbose and
+                   args.log_level == 'WARN' and
+                   (args.ndjson_streaming or args.streaming))
+    
+    # Configure logger
+    set_log_level(log_level)
+    set_default_mode(default_mode)
+    
     # Handle deprecated arguments with warnings
     if args.sample_rate != 22050 and args.resample is None:
-        print("Warning: --sample-rate is deprecated. Use --resample instead for explicit audio resampling.")
+        logger.warn("--sample-rate is deprecated. Use --resample instead for explicit audio resampling.")
     
     if args.reconstruction:
-        print("Warning: --reconstruction is deprecated. Reconstruction is enabled by default. Use --no-reconstruction to disable.")
+        logger.warn("--reconstruction is deprecated. Reconstruction is enabled by default. Use --no-reconstruction to disable.")
     
-    # Setup
-    if args.verbose:
-        print("Enhanced Neural Audio-to-LLM Tokenizer v0.1.7 - MERT music-optimized codebook initialization")
-        print(f"PyTorch: {torch.__version__}")
-        print(f"Device: {args.device}")
+    # Setup information (only shown if not in default mode)
+    logger.info(f"Enhanced Neural Audio-to-LLM Tokenizer {VERSION_TAG} - MERT music-optimized codebook initialization")
+    logger.debug(f"PyTorch: {torch.__version__}")
+    logger.debug(f"Device: {args.device}")
+    logger.debug(f"Log level: {log_level.value}")
+    logger.debug(f"Default mode: {default_mode}")
     
     # Load model configuration
     model_config = {}
@@ -5120,7 +5266,7 @@ Examples:
     # Determine codebook initialization method with backward compatibility
     codebook_init_method = args.codebook_init
     if args.use_encodec:
-        print("Warning: --use-encodec is deprecated. Use --codebook-init=encodec instead.")
+        logger.warn("--use-encodec is deprecated. Use --codebook-init=encodec instead.")
         codebook_init_method = "encodec"
 
     # Initialize pipeline with new options
@@ -5143,18 +5289,98 @@ Examples:
         codebook_cache_dir=args.codebook_cache_dir,
         enable_codebook_cache=not args.no_codebook_cache,
         force_reinit_codebooks=args.force_reinit_codebooks,
-        # NEW v0.1.7: Codebook initialization method
+        # NEW v0.1.x: Codebook initialization method
         codebook_init_method=codebook_init_method
     )
     
-    # Get input files
+    # Enhanced input handling: stdin bytes, file separators, and interactive mode
     input_files = []
-    if args.stdin:
-        input_files = [line.strip() for line in sys.stdin if line.strip()]
-    elif args.input_files:
-        input_files = args.input_files
-    else:
-        parser.error("No input files provided. Use positional arguments or --stdin")
+    stdin_bytes = None
+    
+    # Check if stdin has data available (non-blocking)
+    def has_stdin_data():
+        if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+            return True
+        return False
+    
+    # Always check for stdin input (no --stdin flag required)
+    if has_stdin_data() or args.stdin:
+        logger.debug("Reading from stdin...")
+        if args.stdin:
+            # Legacy mode: read file paths from stdin
+            input_files = [line.strip() for line in sys.stdin if line.strip()]
+            logger.debug(f"Read {len(input_files)} file paths from stdin")
+        else:
+            # New mode: read arbitrary bytes from stdin
+            stdin_bytes = sys.stdin.buffer.read()
+            logger.debug(f"Read {len(stdin_bytes)} bytes from stdin")
+    
+    # Add command-line file arguments
+    if args.input_files:
+        input_files.extend(args.input_files)
+        logger.debug(f"Added {len(args.input_files)} files from command line")
+    
+    # Interactive mode when no input available
+    if not input_files and stdin_bytes is None:
+        logger.info("No input provided. Entering interactive mode...")
+        logger.info("Type audio data, then press Ctrl+D to process (Ctrl+C to cancel)")
+        
+        # Setup signal handlers for interactive mode
+        def signal_handler(signum, frame):
+            if signum == signal.SIGINT:  # Ctrl+C
+                logger.info("Cancelled by user")
+                sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        try:
+            # Read from stdin in interactive mode
+            stdin_bytes = sys.stdin.buffer.read()
+            logger.debug(f"Interactive input: {len(stdin_bytes)} bytes")
+        except KeyboardInterrupt:
+            logger.info("Cancelled by user")
+            sys.exit(0)
+        except EOFError:
+            logger.info("EOF received")
+            sys.exit(0)
+    
+    # Validate we have some input
+    if not input_files and (stdin_bytes is None or len(stdin_bytes) == 0):
+        parser.error("No input provided. Specify input files as arguments, pipe data to stdin, or use --stdin for file paths.")
+    
+    # Process stdin bytes if we have them
+    if stdin_bytes:
+        # Split on ASCII File Separator (FS, 0x1C) for multiple concatenated files
+        fs_char = b'\x1c'
+        if fs_char in stdin_bytes:
+            byte_chunks = stdin_bytes.split(fs_char)
+            logger.debug(f"Split stdin into {len(byte_chunks)} chunks using FS separator")
+        else:
+            byte_chunks = [stdin_bytes]
+        
+        # Create temporary files for each chunk and add to input_files
+        import tempfile
+        temp_files = []
+        for i, chunk in enumerate(byte_chunks):
+            if len(chunk) == 0:
+                continue
+                
+            # Try to detect file format from magic bytes
+            file_ext = detect_audio_format(chunk)
+            
+            # Create temporary file
+            temp_fd, temp_path = tempfile.mkstemp(suffix=file_ext)
+            try:
+                os.write(temp_fd, chunk)
+            finally:
+                os.close(temp_fd)
+            
+            temp_files.append(temp_path)
+            input_files.append(temp_path)
+            logger.debug(f"Created temporary file {temp_path} ({len(chunk)} bytes, detected as {file_ext})")
+        
+        # Store temp files for cleanup later
+        setattr(pipeline, '_temp_files', temp_files)
     
     # Processing
     if args.batch or len(input_files) > 1:
@@ -5173,16 +5399,16 @@ Examples:
         successful = [r for r in results if 'error' not in r]
         failed = [r for r in results if 'error' in r]
         
-        print(f"\nBatch processing complete:")
-        print(f"  Successful: {len(successful)}")
-        print(f"  Failed: {len(failed)}")
+        logger.info(f"Batch processing complete:")
+        logger.info(f"  Successful: {len(successful)}")
+        logger.info(f"  Failed: {len(failed)}")
         
         # Report generated files
         if successful:
             total_viz_files = sum(len(r.get('generated_files', {}).get('visualizations', {})) for r in successful)
             total_analysis_files = sum(len(r.get('generated_files', {}).get('analysis_files', {})) for r in successful)
-            print(f"  Generated {total_viz_files} visualization files")
-            print(f"  Generated {total_analysis_files} analysis files")
+            logger.info(f"  Generated {total_viz_files} visualization files")
+            logger.info(f"  Generated {total_analysis_files} analysis files")
         
         # Aggregate metrics
         if args.metrics and successful:
@@ -5277,27 +5503,27 @@ Examples:
                         actual_sr
                     )
                 except:
-                    print(f"Warning: Could not save reconstructed audio")
+                    logger.warn(f"Could not save reconstructed audio")
             
             # Generate and save visualizations
-            print(f"Generating visualizations...")
+            logger.progress("Generating visualizations...")
             viz_files = pipeline.evaluator.generate_visualizations(
                 result['original_audio'], result['tokenizer_result'], args.output_dir, base_name, sequential=args.seq_vis
             )
             
             # Save detailed analysis files
-            print(f"Saving detailed analysis...")
+            logger.progress("Saving detailed analysis...")
             analysis_files = pipeline.evaluator.save_detailed_analysis(
                 result['original_audio'], result['tokenizer_result'], 
                 result['metrics'], args.output_dir, base_name
             )
             
             # Report what was generated
-            print(f"All outputs saved to: {args.output_dir}")
+            logger.info(f"All outputs saved to: {args.output_dir}")
             if viz_files:
-                print(f"Generated {len(viz_files)} visualization files")
+                logger.info(f"Generated {len(viz_files)} visualization files")
             if analysis_files:
-                print(f"Generated {len(analysis_files)} analysis files")
+                logger.info(f"Generated {len(analysis_files)} analysis files")
             
             output_text = None  # Don't print to stdout when using --all-outputs
             
@@ -5316,7 +5542,8 @@ Examples:
                     f.write(output_text)
         else:
             if output_text is not None:
-                print(output_text)
+                # Use logger.stdout for direct stdout output
+                logger.stdout(output_text)
         
         # Metrics output
         if args.metrics:
@@ -5336,41 +5563,47 @@ Examples:
         # Budget report
         if args.budget_report:
             budget = result['budget_metrics']
-            print(f"\nToken Budget Report:")
-            print(f"  Total Tokens: {budget.total_tokens}")
-            print(f"  Semantic Tokens: {budget.semantic_tokens}")
-            print(f"  Acoustic Tokens: {budget.acoustic_tokens}")
-            print(f"  Audio Tokens/Second: {budget.audio_tokens_per_second:.1f}")
-            print(f"  Audio Frames/Second: {budget.audio_frames_per_second:.1f}")
-            print(f"  Processing Tokens/Second: {budget.processing_tokens_per_second:.1f}")
-            print(f"  Processing Frames/Second: {budget.processing_frames_per_second:.1f}")
-            print(f"  Compression Ratio: {budget.compression_ratio:.1f}x")
+            logger.info(f"Token Budget Report:")
+            logger.info(f"  Total Tokens: {budget.total_tokens}")
+            logger.info(f"  Semantic Tokens: {budget.semantic_tokens}")
+            logger.info(f"  Acoustic Tokens: {budget.acoustic_tokens}")
+            logger.info(f"  Audio Tokens/Second: {budget.audio_tokens_per_second:.1f}")
+            logger.info(f"  Audio Frames/Second: {budget.audio_frames_per_second:.1f}")
+            logger.info(f"  Processing Tokens/Second: {budget.processing_tokens_per_second:.1f}")
+            logger.info(f"  Processing Frames/Second: {budget.processing_frames_per_second:.1f}")
+            logger.info(f"  Compression Ratio: {budget.compression_ratio:.1f}x")
             
             # Add compat mode warning to budget report
             if pipeline.compat_mode:
-                print(f"  WARNING: Compatibility mode - tokens are exploratory only")
+                logger.warn(f"Compatibility mode - tokens are exploratory only")
         
         # Evaluation summary
         if args.evaluate:
             metrics = result['metrics']
-            print(f"\nEvaluation Results:")
-            print(f"  Compression Ratio: {metrics.compression_ratio:.2f}x")
-            print(f"  Token Diversity: {metrics.token_diversity:.3f}")
-            print(f"  Semantic Entropy: {metrics.semantic_entropy:.3f}")
-            print(f"  Acoustic Entropy: {metrics.acoustic_entropy:.3f}")
+            logger.info(f"Evaluation Results:")
+            logger.info(f"  Compression Ratio: {metrics.compression_ratio:.2f}x")
+            logger.info(f"  Token Diversity: {metrics.token_diversity:.3f}")
+            logger.info(f"  Semantic Entropy: {metrics.semantic_entropy:.3f}")
+            logger.info(f"  Acoustic Entropy: {metrics.acoustic_entropy:.3f}")
             
             if enable_reconstruction and result['reconstructed_audio'] is not None:
-                print(f"  MSE Loss: {metrics.mse_loss:.6f}")
-                print(f"  Spectral Loss: {metrics.spectral_loss:.6f}")
-                print(f"  MR-STFT Loss: {metrics.mr_stft_loss:.6f}")
-                print(f"  Log Spectral Distance: {metrics.log_spectral_distance:.6f}")
-                print(f"  Pitch Accuracy: {metrics.pitch_accuracy:.3f}")
-                print(f"  Rhythm Accuracy: {metrics.rhythm_accuracy:.3f}")
-                print(f"  Timbral Similarity: {metrics.timbral_similarity:.3f}")
+                logger.info(f"  MSE Loss: {metrics.mse_loss:.6f}")
+                logger.info(f"  Spectral Loss: {metrics.spectral_loss:.6f}")
+                logger.info(f"  MR-STFT Loss: {metrics.mr_stft_loss:.6f}")
+                logger.info(f"  Log Spectral Distance: {metrics.log_spectral_distance:.6f}")
+                logger.info(f"  Pitch Accuracy: {metrics.pitch_accuracy:.3f}")
+                logger.info(f"  Rhythm Accuracy: {metrics.rhythm_accuracy:.3f}")
+                logger.info(f"  Timbral Similarity: {metrics.timbral_similarity:.3f}")
             
             # Add compat mode warning to evaluation
             if pipeline.compat_mode:
-                print(f"  WARNING: Evaluation in compatibility mode - results are exploratory only")
+                logger.warn(f"Evaluation in compatibility mode - results are exploratory only")
+    
+    # Cleanup temporary files
+    try:
+        cleanup_temp_files(pipeline)
+    except Exception as e:
+        logger.debug(f"Error during cleanup: {e}")
 
 
 if __name__ == "__main__":

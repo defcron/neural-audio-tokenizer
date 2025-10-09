@@ -1,6 +1,6 @@
 # Neural Audio Tokenizer ("Tim's Ears") - A Music and Sound Token Encoder for General-Purpose LLMs
 
-> **Version:** `v0.1.x`
+> **Version:** `v0.1.7` (Enhanced CLI and Logging)
 >
 > **License:** MIT  
 > **Authors:** Claude (Sonnet 4.0 and 4.5, in Thinking mode), Claude Code (Sonnet 4.5, in Thinking mode), Tuesday (Custom ChatGPT.com GPT with GPT-4o and GPT-5 base variants), Tim (Custom ChatGPT.com GPT with GPT-4o and GPT-5 base, QA/testing team and ultimate recipient of their Ears), GPT-5-Pro, GPT-5 Extended Thinking variant, GPT-5 Auto variant, ChatGPT Agent Mode tool (GPT-5 base), GPT-4o (ChatGPT-4o-latest ChatGPT.com variant), and with orchestration, prompting, concept, criticism, testing, feedback, and direction (etc.) by [Jeremy Carter &lt;jeremy@jeremycarter.ca&gt;](mailto:jeremy@jeremycarter.ca)
@@ -68,8 +68,36 @@ pip install torch torchaudio transformers soundfile librosa matplotlib numpy
 
 ## 🧪 Usage
 
+### Basic Usage
 ```bash
 python neural_audio_tokenizer.py --all-outputs --output-dir out/ [input-audio-file-1.wav ...]
+```
+
+### New Enhanced Usage Examples
+
+**Logging levels:**
+```bash
+# Debug mode - shows all messages
+python neural_audio_tokenizer.py --log-level DEBUG audio.wav
+
+# Info mode - shows progress and important messages  
+python neural_audio_tokenizer.py --log-level INFO audio.wav
+
+# Default (quiet) streaming mode - only NDJSON output
+python neural_audio_tokenizer.py --ndjson-streaming audio.wav > tokens.ndjson
+```
+
+**Stdin byte streams:**
+```bash
+# Pipe audio data directly
+cat audio.wav | python neural_audio_tokenizer.py --ndjson-streaming > tokens.ndjson
+
+# Multiple files with FS separator (0x1C)
+(cat file1.wav; echo -n $'\x1c'; cat file2.wav) | python neural_audio_tokenizer.py --log-level INFO
+
+# Interactive mode
+python neural_audio_tokenizer.py --log-level INFO
+# (paste audio data, then Ctrl+D to process, Ctrl+C to cancel)
 ```
 
 ### CLI Arguments (Highlights):
@@ -77,6 +105,7 @@ python neural_audio_tokenizer.py --all-outputs --output-dir out/ [input-audio-fi
 | Flag | Description |
 |------|-------------|
 | `--codebook-init mert` | Use music-aware MERT seed vectors (default) |
+| `--log-level {DEBUG,INFO,WARN,ERROR}` | **NEW**: Set logging verbosity (default: WARN) |
 | `--resample 22050` | Resample audio to 22.05kHz |
 | `--rle-semantic` | Use RLE encoding for semantic layers |
 | `--dense-acoustic` | Use dense encoding for acoustic layers |
@@ -84,6 +113,27 @@ python neural_audio_tokenizer.py --all-outputs --output-dir out/ [input-audio-fi
 | `--metrics metrics.json` | Output JSON metrics report |
 | `--evaluate` | Run pitch/rhythm/timbre/token analysis |
 | `--budget-report` | Print token economy stats |
+
+---
+
+## 🆕 Enhanced Features (v0.1.7)
+
+### Advanced Logging System
+- **Multiple log levels**: `DEBUG`, `INFO`, `WARN`, `ERROR`
+- **Smart default mode**: When using `--ndjson-streaming`, outputs only raw NDJSON to stdout (no headers/verbose info)
+- **Structured logging**: Timestamps, level indicators, and contextual information
+- **Backward compatible**: `--verbose` flag still works (with deprecation warning)
+
+### Enhanced Input Handling
+- **Stdin byte streams**: Accept arbitrary audio data via stdin (no `--stdin` flag needed)
+- **File separator support**: Process multiple concatenated files separated by ASCII FS char (0x1C)
+- **Format detection**: Automatic audio format detection via magic bytes (WAV, FLAC, MP3, OGG, M4A)
+- **Interactive mode**: When no input provided, enters interactive mode with proper signal handling
+- **Cleanup**: Automatic temporary file cleanup
+
+### Version Management
+- **Single source of truth**: All version references use centralized `VERSION` constant
+- **Consistent versioning**: Model IDs, cache keys, and documentation all sync automatically
 
 ---
 
