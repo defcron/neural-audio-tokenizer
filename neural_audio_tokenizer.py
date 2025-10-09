@@ -864,6 +864,8 @@ def _extract_encodec_codebook_vectors_with_type(encodec_model, extraction_type='
         # Sort by name (often correlates with model depth) and prefer latter half
         sorted_vectors = sorted(all_vectors, key=lambda x: x['name'])
         start_idx = len(sorted_vectors) // 2
+        if start_idx >= len(sorted_vectors):  # Ensure we get at least one matrix
+            start_idx = max(0, len(sorted_vectors) - 1)
         selected_vectors = sorted_vectors[start_idx:]
         
         # Also prefer larger matrices (often contain more structured information)
@@ -895,6 +897,7 @@ def _extract_encodec_codebook_vectors_with_type(encodec_model, extraction_type='
     if not vectors:
         # Emergency fallback: use all available vectors 
         vectors = [v['data'] for v in all_vectors]
+        print(f"  WARNING: No vectors selected for {extraction_type}, falling back to all available vectors")
     
     print(f"  Selected {len(vectors)} matrices for {extraction_type} initialization")
 
