@@ -1,19 +1,53 @@
 #!/usr/bin/env python3
 
-# Version constant - single source of truth
+# Version constant
 VERSION = "0.1.7"
 VERSION_TAG = f"v{VERSION}"
 
 """
-neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, GitHub Copilot Coding Agent, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
+neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, GitHub Copilot Coding Agent, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-09
 ==========================
 
-Version {VERSION} - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
+Version {VERSION} - MERT INTEGRATION ADDED: Music-optimized codebook initialization from MERT models
 
-A research-grade neural audio tokenization system optimized for LLM consumption,
-specifically designed for music understanding. Implements state-of-the-art
-hybrid tokenization strategies based on recent advances in AudioLM, MuQ,
+An almost entirely LLM-designed and implemented research-grade neural audio tokenization system which outputs 
+audio-descriptive tokens and other data optimized for LLM consumption, and fairly effective sound understanding 
+and reasoning via natural statistical processing, and intuitive assumptions of meanings of the deltas between 
+token values that are based on audio features and properties recognized by various combinations of modern 
+techniques applied together in novel ways.
+Specifically designed for music understanding and audio that isn't necessarily containing any lyrics or speech. 
+Implements state-of-the-art hybrid tokenization strategies based on recent advances in AudioLM, MuQ,
 SoundStream, MERT, and other neural codec research.
+
+**IMPORTANT STATUS NOTE:**
+This is a research scaffold and streaming format prototype. Token IDs are not 
+learned unless you enable and train the VQ; the default path produces exploratory 
+tokens only. Do not treat reconstructions as a codec baseline. Use with the 
+Encodec bridge or supply trained weights for meaningful results, or adapt the code 
+or techniques similar as what it's doing, adjusted and optimized for your particular
+use-cases.
+
+Based on:
+- AudioLM: Language Modeling Approach to Audio Generation (Borsos et al., 2022)
+- MuQ: Self-Supervised Music Representation with Mel-RVQ (Zhu et al., 2025)
+- SoundStream: End-to-End Neural Audio Codec (Zeghidour et al., 2021)
+- CLaM-TTS: Neural Codec Language Model improvements (Kim et al., 2024)
+
+Key Features:
+- Hybrid semantic + acoustic tokenization (FIXED: proper k-means calibration)
+- Neural codec with residual vector quantization (FIXED: validated cluster diversity)
+- Music-specific representation learning
+- Multi-scale temporal modeling
+- Scientific evaluation with reconstruction metrics
+- Iterative optimization for LLM-optimal representations
+- Streaming output protocols for large-scale processing (robust NDJSON + RLE)
+- FIXED: Consistent sample rate handling throughout pipeline
+- FIXED: Proper reconstruction flag handling
+- IMPROVED: Better evaluation metrics and clear compat mode labeling
+- FIXED v0.1.2: Encodec integration with correct HuggingFace transformers API
+- FIXED v0.1.3: Robust k-means clustering with proper calibration and validation
+- FIXED v0.1.4: Progress reporting and memory management for production use
+- FIXED v0.1.4: Error handling separation - logging cannot poison k-means success
 
 **NEW IN v0.1.x:**
 - MERT integration: Music-optimized codebook initialization using MERT (Music Understanding with Large-Scale Pre-training)
@@ -39,34 +73,6 @@ SoundStream, MERT, and other neural codec research.
 - FIXED: Added cluster separation metrics and validation
 - FIXED: Better logging and debugging for cluster initialization
 - FIXED: Prevents cluster collapse by validating inter-cluster distances
-
-**IMPORTANT STATUS NOTE:**
-This is a research scaffold and streaming format prototype. Token IDs are not 
-learned unless you enable and train the VQ; the default path produces exploratory 
-tokens only. Do not treat reconstructions as a codec baseline. Use with the 
-Encodec bridge or supply trained weights for meaningful results.
-
-Key Features:
-- Hybrid semantic + acoustic tokenization (FIXED: proper k-means calibration)
-- Neural codec with residual vector quantization (FIXED: validated cluster diversity)
-- Music-specific representation learning
-- Multi-scale temporal modeling
-- Scientific evaluation with reconstruction metrics
-- Iterative optimization for LLM-optimal representations
-- Streaming output protocols for large-scale processing (robust NDJSON + RLE)
-- FIXED: Consistent sample rate handling throughout pipeline
-- FIXED: Proper reconstruction flag handling
-- IMPROVED: Better evaluation metrics and clear compat mode labeling
-- FIXED v0.1.2: Encodec integration with correct HuggingFace transformers API
-- FIXED v0.1.3: Robust k-means clustering with proper calibration and validation
-        - FIXED v0.1.4: Progress reporting and memory management for production use
-        - FIXED v0.1.4: Error handling separation - logging cannot poison k-means success
-
-Based on:
-- AudioLM: Language Modeling Approach to Audio Generation (Borsos et al., 2022)
-- MuQ: Self-Supervised Music Representation with Mel-RVQ (Zhu et al., 2025)
-- SoundStream: End-to-End Neural Audio Codec (Zeghidour et al., 2021)
-- CLaM-TTS: Neural Codec Language Model improvements (Kim et al., 2024)
 """
 
 import argparse
