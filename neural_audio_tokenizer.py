@@ -2,14 +2,14 @@
 """
 neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
 ==========================
-Version 0.1.5 - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
+Version 0.1.7 - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
 
 A research-grade neural audio tokenization system optimized for LLM consumption,
 specifically designed for music understanding. Implements state-of-the-art
 hybrid tokenization strategies based on recent advances in AudioLM, MuQ,
 SoundStream, MERT, and other neural codec research.
 
-**NEW IN v0.1.5:**
+**NEW IN v0.1.7:**
 - MERT integration: Music-optimized codebook initialization using MERT (Music Understanding with Large-Scale Pre-training)
 - New --codebook-init argument: Choose between 'mert' (music-specific, RECOMMENDED), 'encodec' (speech, legacy), or 'random'
 - MERT provides 7x+ improvement in token diversity over EnCodec for musical content
@@ -2358,7 +2358,7 @@ class EncodecBridge(nn.Module):
 class NDJSONStreamer:
     """Enhanced NDJSON streaming protocol for LLM-friendly audio tokenization."""
     
-    def __init__(self, sample_rate: int, hop_length: int, model_id: str = "tims-ears-0.1.4.epoch", 
+    def __init__(self, sample_rate: int, hop_length: int, model_id: str = "tims-ears-0.1.7.epoch", 
                  codebook_size: int = 1024, num_semantic_layers: int = 4, num_acoustic_layers: int = 4,
                  rle_mode: bool = False, per_layer_encoding: Optional[Dict[str, str]] = None,
                  keyframe_interval_seconds: float = 5.0, audio_sha256: Optional[str] = None,
@@ -2703,8 +2703,8 @@ class NeuralAudioTokenizer(nn.Module):
                  codebook_cache_dir: Optional[Path] = None,
                  enable_codebook_cache: bool = True,
                  force_reinit_codebooks: bool = False,
-                 model_id: str = "tims-ears-0.1.5.mert",  # Updated version with MERT
-                 # NEW v0.1.5: Codebook initialization method
+                 model_id: str = "tims-ears-0.1.7.mert",  # Updated version with MERT
+                 # NEW v0.1.7: Codebook initialization method
                  codebook_init_method: str = "mert"):  # "mert", "encodec", or "random"
         super().__init__()
         self.sample_rate = sample_rate
@@ -2859,7 +2859,7 @@ class NeuralAudioTokenizer(nn.Module):
         Encodec's learned wisdom.  Once the codebooks are initialized and
         cached, they will be loaded on subsequent runs to ensure stability.
 
-        IMPROVED v0.1.6: Now uses type-specific codebook extraction similar to MERT approach.
+        IMPROVED v0.1.7: Now uses type-specific codebook extraction similar to MERT approach.
         Different portions of Encodec codebooks are used for semantic vs acoustic quantizers
         to achieve better token diversity, rather than just using different random seeds.
 
@@ -4076,7 +4076,7 @@ class StreamingProtocol:
     
     def __init__(self, chunk_size: int = 8192, overlap: int = 1024, 
                  sample_rate: int = 22050, hop_length: int = 512,
-                 rle_mode: bool = False, model_id: str = "tims-ears-0.1.4.epoch",  # Updated version
+                 rle_mode: bool = False, model_id: str = "tims-ears-0.1.7.epoch",  # Updated version
                  codebook_size: int = 1024, num_semantic_layers: int = 4, 
                  num_acoustic_layers: int = 4, per_layer_encoding: Optional[Dict[str, str]] = None,
                  keyframe_interval_seconds: float = 5.0, audio_sha256: Optional[str] = None,
@@ -4291,7 +4291,7 @@ class AudioTokenizationPipeline:
                  enable_compat_fallback: bool = True,
                  resample_rate: Optional[int] = None,
                  rle_mode: bool = False,
-                 model_id: str = "tims-ears-0.1.5.mert",  # Updated version with MERT
+                 model_id: str = "tims-ears-0.1.7.mert",  # Updated version with MERT
                  per_layer_encoding: Optional[Dict[str, str]] = None,
                  keyframe_interval_seconds: float = 5.0,
                  include_legend: bool = True,
@@ -4303,9 +4303,9 @@ class AudioTokenizationPipeline:
                  codebook_cache_dir: Optional[str] = None,
                  enable_codebook_cache: bool = True,
                  force_reinit_codebooks: bool = False,
-                 # NEW v0.1.5: Codebook initialization method
+                 # NEW v0.1.7: Codebook initialization method
                  codebook_init_method: str = "mert",
-                 # NEW v0.1.5.2: Codebook size (increased for better diversity)
+                 # NEW v0.1.7: Codebook size (increased for better diversity)
                  codebook_size: int = 4096):
         
         if deterministic:
@@ -4362,7 +4362,7 @@ class AudioTokenizationPipeline:
                 enable_codebook_cache=enable_codebook_cache,
                 force_reinit_codebooks=force_reinit_codebooks,
                 model_id=model_id,
-                # NEW v0.1.5: Pass codebook initialization method
+                # NEW v0.1.7: Pass codebook initialization method
                 codebook_init_method=codebook_init_method,
                 **tokenizer_config
             ).to(self.device)
@@ -4399,7 +4399,7 @@ class AudioTokenizationPipeline:
         # Token budget meter with accurate timing
         self.budget_meter = TokenBudgetMeter(self.sample_rate, hop_length)
         
-        print(f"Initialized Neural Audio Tokenizer v0.1.4 on {self.device}")  # Updated version
+        print(f"Initialized Neural Audio Tokenizer v0.1.7 on {self.device}")  # Updated version
         print(f"Model ID: {model_id}, RLE Mode: {rle_mode}")
         print(f"Reconstruction: {'enabled' if enable_reconstruction else 'disabled'}")
         print(f"Encodec Bridge: {'enabled' if use_encodec_bridge else 'disabled'}")
@@ -4889,7 +4889,7 @@ class AudioTokenizationPipeline:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enhanced Neural Audio-to-LLM Tokenizer v0.1.5 - MERT music-optimized codebook initialization",
+        description="Enhanced Neural Audio-to-LLM Tokenizer v0.1.7 - MERT music-optimized codebook initialization",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -4999,7 +4999,7 @@ Examples:
     
     # Setup
     if args.verbose:
-        print("Enhanced Neural Audio-to-LLM Tokenizer v0.1.5 - MERT music-optimized codebook initialization")
+        print("Enhanced Neural Audio-to-LLM Tokenizer v0.1.7 - MERT music-optimized codebook initialization")
         print(f"PyTorch: {torch.__version__}")
         print(f"Device: {args.device}")
     
@@ -5093,7 +5093,7 @@ Examples:
         codebook_cache_dir=args.codebook_cache_dir,
         enable_codebook_cache=not args.no_codebook_cache,
         force_reinit_codebooks=args.force_reinit_codebooks,
-        # NEW v0.1.5: Codebook initialization method
+        # NEW v0.1.7: Codebook initialization method
         codebook_init_method=codebook_init_method
     )
     
