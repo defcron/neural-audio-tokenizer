@@ -5,7 +5,7 @@ VERSION = "0.1.7"
 VERSION_TAG = f"v{VERSION}"
 
 """
-neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
+neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, GitHub Copilot Coding Agent, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
 ==========================
 
 Version {VERSION} - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
@@ -101,7 +101,7 @@ import torchaudio.transforms as T
 import librosa
 import librosa.display
 import soundfile as sf
-from scipy import signal
+from scipy import signal as scipy_signal
 from scipy.stats import entropy
 import sklearn.metrics
 
@@ -205,6 +205,32 @@ class NeuralAudioLogger:
     def stdout(self, message: str):
         """Direct stdout output - always shown"""
         print(message, file=sys.stdout)
+
+# Stream locking context manager for ensuring NDJSON stream integrity
+class StreamLock:
+    """Context manager to ensure uninterrupted NDJSON token stream output"""
+    
+    def __init__(self, lock_stderr: bool = True):
+        self.lock_stderr = lock_stderr
+        self.original_stderr = None
+        self.locked = False
+    
+    def __enter__(self):
+        """Lock stderr and ensure stdout is ready for atomic output"""
+        if self.lock_stderr and not logger.default_mode:
+            # Temporarily redirect stderr to prevent interleaving with stdout
+            self.original_stderr = sys.stderr
+            sys.stderr = open('/dev/null', 'w')
+            self.locked = True
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Restore stderr and flush stdout"""
+        if self.locked:
+            sys.stdout.flush()  # Ensure all stdout is flushed
+            sys.stderr.close()
+            sys.stderr = self.original_stderr
+            self.locked = False
 
 # Global logger instance
 logger = NeuralAudioLogger()
@@ -1961,7 +1987,7 @@ class ResidualVectorQuantizer(nn.Module):
 
         except Exception as e:
             print(f"Error: MERT initialization failed: {e}")
-            print("  Falling back to random initialization")
+            logger.info("  Falling back to random initialization")
             raise
 
 
@@ -2215,7 +2241,7 @@ class SemanticAudioEncoder(nn.Module):
                 self.available = False
                 self.using_fallback = True
         else:
-            print("Transformers not available, using spectral fallback encoder")
+            logger.warn("Transformers not available, using spectral fallback encoder")
             self.available = False
             self.using_fallback = True
     
@@ -2418,7 +2444,7 @@ class EncodecBridge(nn.Module):
                 print("Available models: facebook/encodec_24khz, facebook/encodec_32khz")
                 self.available = False
         else:
-            print("Transformers not available - install with: pip install transformers")
+            logger.warn("Transformers not available - install with: pip install transformers")
             self.available = False
     
     def extract_features_for_initialization(self, waveform, sample_rate: int):
@@ -2923,8 +2949,8 @@ class NeuralAudioTokenizer(nn.Module):
         if method == "mert":
             # Use MERT-v1-95M by default (faster, still music-optimized)
             model_name = "m-a-p/MERT-v1-95M"
-            print(f"Initializing codebooks from MERT: {model_name}")
-            print("  MERT provides music-specific codebooks trained on musical data")
+            logger.info(f"Initializing codebooks from MERT: {model_name}")
+            logger.info("  MERT provides music-specific codebooks trained on musical data")
 
             try:
                 # Generate cache keys for semantic and acoustic quantizers
@@ -2947,7 +2973,7 @@ class NeuralAudioTokenizer(nn.Module):
                     )
 
                 # Initialize semantic quantizer from LATE MERT layers (high-level musical structure)
-                print("  Initializing SEMANTIC quantizer from LATE MERT layers (structure/melody)...")
+                logger.info("  Initializing SEMANTIC quantizer from LATE MERT layers (structure/melody)...")
                 self.semantic_quantizer.initialize_from_mert_model(
                     model_name=model_name,
                     cache_dir=self.codebook_cache_dir if self.enable_codebook_cache else None,
@@ -2971,8 +2997,8 @@ class NeuralAudioTokenizer(nn.Module):
                 print("MERT codebook initialization completed successfully!")
 
             except Exception as e:
-                print(f"Warning: MERT codebook initialization failed: {e}")
-                print("Falling back to random codebooks...")
+                logger.warn(f"MERT codebook initialization failed: {e}")
+                logger.info("Falling back to random codebooks...")
 
         elif method == "encodec":
             # Keep original EnCodec path as fallback (legacy, not recommended for music)
@@ -4531,12 +4557,12 @@ class AudioTokenizationPipeline:
         # Token budget meter with accurate timing
         self.budget_meter = TokenBudgetMeter(self.sample_rate, hop_length)
         
-        print(f"Initialized Neural Audio Tokenizer {VERSION_TAG} on {self.device}")  # Updated version
-        print(f"Model ID: {model_id}, RLE Mode: {rle_mode}")
-        print(f"Reconstruction: {'enabled' if enable_reconstruction else 'disabled'}")
-        print(f"Encodec Bridge: {'enabled' if use_encodec_bridge else 'disabled'}")
+        logger.info(f"Initialized Neural Audio Tokenizer {VERSION_TAG} on {self.device}")  # Updated version
+        logger.info(f"Model ID: {model_id}, RLE Mode: {rle_mode}")
+        logger.info(f"Reconstruction: {'enabled' if enable_reconstruction else 'disabled'}")
+        logger.info(f"Encodec Bridge: {'enabled' if use_encodec_bridge else 'disabled'}")
         if use_encodec_bridge:
-            print(f"Codebook caching: {'enabled' if enable_codebook_cache else 'disabled'}")
+            logger.info(f"Codebook caching: {'enabled' if enable_codebook_cache else 'disabled'}")
             if enable_codebook_cache:
                 cache_dir = self.codebook_cache_dir or get_default_codebook_cache_dir()
                 print(f"Cache directory: {cache_dir}")
@@ -4545,8 +4571,8 @@ class AudioTokenizationPipeline:
         if per_layer_encoding:
             print(f"Per-layer encoding: {per_layer_encoding}")
         if self.compat_mode:
-            print("RUNNING IN COMPATIBILITY MODE - tokens are not from trained quantizers")
-        print(f"Processing sample rate: {self.sample_rate} Hz")
+            logger.warn("RUNNING IN COMPATIBILITY MODE - tokens are not from trained quantizers")
+        logger.info(f"Processing sample rate: {self.sample_rate} Hz")
     
     def _create_compat_tokenizer(self):
         """Create a basic compatibility tokenizer instead of returning None."""
@@ -4755,7 +4781,7 @@ class AudioTokenizationPipeline:
                 self.tokenizer.eval()
             
             # Process through tokenizer with actual sample rate
-            print("Tokenizing...")
+            logger.info("Tokenizing...")
             with torch.no_grad():
                 # Pass actual sample rate to tokenizer
                 result = self.tokenizer(audio_tensor, actual_sample_rate=sr)
@@ -4804,7 +4830,7 @@ class AudioTokenizationPipeline:
             )
             
             # Format tokens
-            print("Formatting tokens...")
+            logger.info("Formatting tokens...")
             text_tokens = self.formatter.to_text_sequence(
                 semantic_codes, acoustic_codes, output_format
             )
@@ -5161,25 +5187,29 @@ Examples:
     parser.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARN', 'ERROR'], default='WARN',
                        help='Logging verbosity level (default: WARN). DEBUG=all messages, INFO=progress+warnings+errors, WARN=warnings+errors only, ERROR=errors only')
     parser.add_argument('--verbose', '-v', action='store_true', 
-                       help='DEPRECATED: Use --log-level INFO instead. Enable verbose output')
+                       help='Enable verbose output mode with detailed processing information (equivalent to --log-level INFO)')
     
     args = parser.parse_args()
     
     # Setup logging system
     log_level = LogLevel(args.log_level)
     
-    # Handle deprecated verbose flag
+    # Handle verbose flag (no longer deprecated)
     if args.verbose:
-        logger.warn("--verbose flag is deprecated. Use --log-level INFO instead.")
         log_level = LogLevel.INFO
     
-    # Check if we should run in default mode (NDJSON streaming without extra output)
+    # Check if we should run in default mode (NDJSON streaming without extra output to stderr)
+    # Default mode: minimal stderr output, only NDJSON to stdout
     default_mode = (not args.all_outputs and 
                    not args.evaluate and 
                    not args.budget_report and
                    not args.verbose and
                    args.log_level == 'WARN' and
-                   (args.ndjson_streaming or args.streaming))
+                   not args.streaming)
+    
+    # Default behavior is NDJSON streaming unless other output formats are explicitly requested
+    if not args.streaming and not args.ndjson_streaming:
+        args.ndjson_streaming = True
     
     # Configure logger
     set_log_level(log_level)
@@ -5542,8 +5572,16 @@ Examples:
                     f.write(output_text)
         else:
             if output_text is not None:
-                # Use logger.stdout for direct stdout output
-                logger.stdout(output_text)
+                # Use stream locking if --ndjson-streaming was explicitly specified (not default mode)
+                use_stream_lock = (args.ndjson_streaming and not default_mode)
+                
+                if use_stream_lock:
+                    # Use stream locking to ensure NDJSON stream integrity
+                    with StreamLock(lock_stderr=True):
+                        logger.stdout(output_text)
+                else:
+                    # Regular output without locking
+                    logger.stdout(output_text)
         
         # Metrics output
         if args.metrics:
