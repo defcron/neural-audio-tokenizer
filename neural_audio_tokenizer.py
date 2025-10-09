@@ -308,6 +308,49 @@ def save_codebooks(quantizer: 'ResidualVectorQuantizer', cache_dir: Path,
         print(f"Warning: Failed to save codebooks: {e}")
         return False
 
+
+def backup_existing_codebooks(cache_file: Path) -> bool:
+    """Create backup of existing codebooks before overwriting."""
+    if not cache_file.exists():
+        return True  # No backup needed
+    
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_file = cache_file.with_suffix(f'.backup_{timestamp}{cache_file.suffix}')
+    
+    try:
+        # Use copy to preserve original, then verify backup before deletion
+        import shutil
+        shutil.copy2(cache_file, backup_file)
+        
+        # Verify backup was successful
+        if backup_file.exists() and backup_file.stat().st_size > 0:
+            print(f"Backed up existing codebooks to: {backup_file}")
+            return True
+        else:
+            print(f"Warning: Backup verification failed for {backup_file}")
+            return False
+            
+    except Exception as e:
+        print(f"Warning: Failed to backup existing codebooks: {e}")
+        return False
+
+
+def save_codebooks_with_backup(quantizer: 'ResidualVectorQuantizer', cache_dir: Path, 
+                              cache_key: str, force_reinit: bool = False) -> bool:
+    """Save quantizer codebooks to disk, backing up existing files if force_reinit is True."""
+    cache_file = cache_dir / cache_key
+    
+    # Handle backup when force_reinit is enabled
+    if force_reinit and cache_file.exists():
+        print(f"Force re-init enabled, backing up existing codebooks...")
+        if not backup_existing_codebooks(cache_file):
+            print("Warning: Backup failed, but continuing with save")
+    
+    # Use the existing save function
+    return save_codebooks(quantizer, cache_dir, cache_key)
+
+
 def load_codebooks(quantizer: 'ResidualVectorQuantizer', cache_dir: Path, 
                   cache_key: str) -> bool:
     """Load quantizer codebooks from disk."""
@@ -328,8 +371,12 @@ def load_codebooks(quantizer: 'ResidualVectorQuantizer', cache_dir: Path,
             print(f"Warning: Cached codebooks incompatible with current config")
             return False
         
-        # Restore codebooks
-        device = next(quantizer.parameters()).device
+        # Restore codebooks - get device from buffers since quantizer has no parameters
+        try:
+            device = next(quantizer.buffers()).device
+        except StopIteration:
+            # Fallback to CPU if no buffers found
+            device = torch.device('cpu')
         
         for i, vq_layer in enumerate(quantizer.quantizers):
             if i < len(codebook_data['codebooks']):
@@ -345,7 +392,10 @@ def load_codebooks(quantizer: 'ResidualVectorQuantizer', cache_dir: Path,
         return True
         
     except Exception as e:
-        print(f"Warning: Failed to load codebooks: {e}")
+        print(f"Warning: Failed to load codebooks from {cache_file}: {e}")
+        # Add debug information for troubleshooting
+        import traceback
+        print(f"  Debug traceback: {traceback.format_exc()}")
         return False
 
 
@@ -1304,7 +1354,7 @@ class ResidualVectorQuantizer(nn.Module):
         
         # Save codebooks to cache for future use
         if cache_key:
-            save_codebooks(self, cache_dir, cache_key)
+            save_codebooks_with_backup(self, cache_dir, cache_key, force_reinit)
         
         print("Codebook initialization from Encodec completed successfully!")
     
@@ -1682,7 +1732,7 @@ class ResidualVectorQuantizer(nn.Module):
 
         # Save codebooks to cache if key is provided
         if cache_key:
-            save_codebooks(self, cache_dir, cache_key)
+            save_codebooks_with_backup(self, cache_dir, cache_key, force_reinit)
 
         print("Codebook initialization from Encodec embeddings completed successfully!")
 
@@ -1823,7 +1873,7 @@ class ResidualVectorQuantizer(nn.Module):
 
             # Save codebooks to cache if key is provided
             if cache_key:
-                save_codebooks(self, cache_dir, cache_key)
+                save_codebooks_with_backup(self, cache_dir, cache_key, force_reinit)
 
             print(f"Successfully initialized from MERT {model_name} - music-optimized codebooks ready!")
 
