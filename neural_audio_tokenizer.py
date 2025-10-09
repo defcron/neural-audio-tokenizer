@@ -2723,8 +2723,8 @@ class NeuralAudioTokenizer(nn.Module):
 
         elif method == "encodec":
             # Keep original EnCodec path as fallback (legacy, not recommended for music)
-            print("WARNING: Using EnCodec initialization - designed for speech, not optimal for music")
-            print("  Consider using --codebook-init=mert for better music tokenization")
+            print("WARNING: Using EnCodec initialization - optimized for speech, not music")
+            print("  RECOMMENDATION: Use --codebook-init=mert for music-specific tokenization")
             self._initialize_codebooks_from_encodec_legacy()
 
         else:
@@ -4737,7 +4737,7 @@ Examples:
   %(prog)s --stdin --format interleaved > tokens.txt
   echo "song.wav" | %(prog)s --stdin --batch
   %(prog)s *.wav --batch --output-dir results/ --format hierarchical
-  %(prog)s song.wav --evaluate --reconstruction --metrics metrics.json
+  %(prog)s song.wav --evaluate --metrics metrics.json
   %(prog)s song.flac --streaming --chunk-size 16384 > stream.txt
   %(prog)s song.wav --ndjson-streaming > tokens.ndjson
   %(prog)s --resample 48000 song.wav  # Resample to 48kHz
@@ -4776,22 +4776,20 @@ Examples:
     parser.add_argument('--dense-acoustic', action='store_true', help='Force dense encoding for all acoustic layers (default in RLE mode)')
     parser.add_argument('--no-legend', action='store_true', help='Omit legend from NDJSON header to save tokens')
     
-    # Reconstruction and quality options
-    parser.add_argument('--no-reconstruction', action='store_true', help='Disable audio reconstruction decoder')
-    parser.add_argument('--use-encodec', action='store_true', help='DEPRECATED: Use --codebook-init=encodec instead. Use pre-trained Encodec quantizers (requires encodec package)')
-    parser.add_argument('--encodec-model', default='facebook/encodec_24khz', help='Encodec model to use (default: facebook/encodec_24khz)')
-
-    # NEW v0.1.5: Codebook initialization method
+    # Codebook initialization options
     parser.add_argument('--codebook-init',
                        choices=['mert', 'encodec', 'random'],
                        default='mert',
                        help='Codebook initialization method (default: mert for music-optimized codebooks). '
                             'mert=music-specific (RECOMMENDED), encodec=speech-optimized (legacy), random=no pre-training')
-
-    # NEW v0.1.4: Codebook caching options
     parser.add_argument('--codebook-cache-dir', help='Directory for codebook caching (default: ~/.cache/neural_audio_tokenizer/codebooks)')
     parser.add_argument('--no-codebook-cache', action='store_true', help='Disable codebook caching (will re-run initialization every time)')
     parser.add_argument('--force-reinit-codebooks', action='store_true', help='Force re-initialization of codebooks (ignore cached files)')
+    
+    # Reconstruction and legacy options  
+    parser.add_argument('--no-reconstruction', action='store_true', help='Disable audio reconstruction decoder')
+    parser.add_argument('--use-encodec', action='store_true', help='DEPRECATED: Use --codebook-init=encodec instead. Use pre-trained Encodec quantizers (requires encodec package)')
+    parser.add_argument('--encodec-model', default='facebook/encodec_24khz', help='Encodec model to use (default: facebook/encodec_24khz)')
     
     # Deterministic mode
     parser.add_argument('--deterministic', action='store_true', help='Enable deterministic mode for reproducible results')
@@ -4799,13 +4797,17 @@ Examples:
     
     # Audio processing configuration
     parser.add_argument('--resample', type=int, nargs='?', const=22050, default=None, help='Resample audio to specified Hz (default: no resampling, --resample alone uses 22050Hz)')
-    parser.add_argument('--sample-rate', type=int, default=22050, help='DEPRECATED: Use --resample instead. Target sample rate')
     parser.add_argument('--hop-length', type=int, default=512, help='STFT hop length')
+    parser.add_argument('--n-mels', type=int, default=128, help='Number of mel bands')
+    
+    # Model architecture configuration
     parser.add_argument('--semantic-dim', type=int, default=512, help='Semantic feature dimension')
     parser.add_argument('--acoustic-dim', type=int, default=512, help='Acoustic feature dimension') 
     parser.add_argument('--codebook-size', type=int, default=4096, help='Quantizer codebook size (default: 4096 for better diversity)')
     parser.add_argument('--num-quantizers', type=int, default=8, help='Number of quantizer layers')
-    parser.add_argument('--n-mels', type=int, default=128, help='Number of mel bands')
+    
+    # Deprecated audio options
+    parser.add_argument('--sample-rate', type=int, default=22050, help='DEPRECATED: Use --resample instead. Target sample rate')
     
     # Evaluation
     parser.add_argument('--evaluate', action='store_true', help='Run comprehensive evaluation')
