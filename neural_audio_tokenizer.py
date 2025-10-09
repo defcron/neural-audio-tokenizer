@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""
-neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
-==========================
 
 # Version constant - single source of truth
 VERSION = "0.1.7"
 VERSION_TAG = f"v{VERSION}"
+
+"""
+neural_audio_tokenizer.py - By Claude Sonnet 4 (Extended Thinking Mode), Claude Sonnet 4.5 (Extended Thinking Mode), ChatGPT Agent Mode, ChatGPT-5-Pro, and Claude Code (Sonnet 4.5 with Thinking Mode), based on initial work by ChatGPT Agent Mode, and with help and code review by custom GPT Tuesday, GPT-5 Auto, ChatGPT-5-Pro, and Jeremy Carter <jeremy@jeremycarter.ca> - 2025-10-07
+==========================
 
 Version {VERSION} - MERT INTEGRATION: Music-optimized codebook initialization from MERT models
 
@@ -313,7 +314,7 @@ def check_memory_requirements(audio_length: int, sample_rate: int) -> bool:
         estimated_need_mb = audio_size_mb * 10
         
         if estimated_need_mb > available_mb * 0.8:  # Use max 80% of available memory
-            print(f"WARNING: Estimated memory need ({estimated_need_mb:.1f} MB) may exceed available ({available_mb:.1f} MB)")
+            logger.warn(f"Estimated memory need ({estimated_need_mb:.1f} MB) may exceed available ({available_mb:.1f} MB)")
             return False
         return True
     except ImportError:
@@ -382,11 +383,11 @@ def save_codebooks(quantizer: 'ResidualVectorQuantizer', cache_dir: Path,
         with open(cache_file, 'wb') as f:
             pickle.dump(codebook_data, f, protocol=pickle.HIGHEST_PROTOCOL)
         
-        print(f"Saved codebooks to: {cache_file}")
+        logger.debug(f"Saved codebooks to: {cache_file}")
         return True
         
     except Exception as e:
-        print(f"Warning: Failed to save codebooks: {e}")
+        logger.warn(f"Failed to save codebooks: {e}")
         return False
 
 
@@ -406,7 +407,7 @@ def backup_existing_codebooks(cache_file: Path) -> bool:
         
         # Verify backup was successful
         if backup_file.exists() and backup_file.stat().st_size > 0:
-            print(f"Backed up existing codebooks to: {backup_file}")
+            logger.debug(f"Backed up existing codebooks to: {backup_file}")
             return True
         else:
             print(f"Warning: Backup verification failed for {backup_file}")
@@ -4774,8 +4775,8 @@ class AudioTokenizationPipeline:
             self.budget_meter.sample_rate = sr
             self.budget_meter.update(len(audio), num_frames, num_sem_tokens, num_acc_tokens)
             
-            print(f"Generated {len(semantic_codes)} semantic layers, {len(acoustic_codes)} acoustic layers")
-            print(f"Total tokens: {num_sem_tokens + num_acc_tokens}")
+            logger.info(f"Generated {len(semantic_codes)} semantic layers, {len(acoustic_codes)} acoustic layers")
+            logger.info(f"Total tokens: {num_sem_tokens + num_acc_tokens}")
             
             # FIXED v0.1.4: Show token diversity to verify k-means worked (with enhanced output)
             if not self.compat_mode:
@@ -4786,16 +4787,16 @@ class AudioTokenizationPipeline:
                 semantic_diversity = len(torch.unique(all_semantic)) / len(all_semantic) if len(all_semantic) > 0 else 0
                 acoustic_diversity = len(torch.unique(all_acoustic)) / len(all_acoustic) if len(all_acoustic) > 0 else 0
                 
-                print(f"Token diversity - Semantic: {semantic_diversity:.3f}, Acoustic: {acoustic_diversity:.3f}")
+                logger.debug(f"Token diversity - Semantic: {semantic_diversity:.3f}, Acoustic: {acoustic_diversity:.3f}")
                 
                 # Check for potential clustering issues
                 if semantic_diversity < 0.1 or acoustic_diversity < 0.1:
-                    print("WARNING: Very low token diversity detected - k-means clustering may have failed")
+                    logger.warn("Very low token diversity detected - k-means clustering may have failed")
                 else:
-                    print("Good token diversity achieved")
+                    logger.debug("Good token diversity achieved")
             
             # Evaluation using precomputed results
-            print("Evaluating tokenization quality...")
+            logger.progress("Evaluating tokenization quality...")
             # Update evaluator sample rate to match actual loaded audio
             self.evaluator.sample_rate = sr
             metrics = self.evaluator.evaluate_tokenization(
@@ -5018,6 +5019,44 @@ class AudioTokenizationPipeline:
 # Command Line Interface (IMPROVED v0.1.4)
 # ============================================================================
 
+def detect_audio_format(data: bytes) -> str:
+    """Detect audio format from magic bytes"""
+    if len(data) < 12:
+        return '.raw'
+    
+    # WAV format
+    if data[:4] == b'RIFF' and data[8:12] == b'WAVE':
+        return '.wav'
+    
+    # FLAC format
+    if data[:4] == b'fLaC':
+        return '.flac'
+    
+    # MP3 format
+    if data[:3] == b'ID3' or (data[:2] == b'\xff\xfb') or (data[:2] == b'\xff\xfa'):
+        return '.mp3'
+    
+    # OGG format
+    if data[:4] == b'OggS':
+        return '.ogg'
+    
+    # M4A/MP4 format
+    if data[4:8] == b'ftyp':
+        return '.m4a'
+    
+    # Default to raw audio
+    return '.raw'
+
+def cleanup_temp_files(pipeline):
+    """Clean up temporary files created from stdin"""
+    if hasattr(pipeline, '_temp_files'):
+        for temp_file in pipeline._temp_files:
+            try:
+                os.unlink(temp_file)
+                logger.debug(f"Cleaned up temporary file: {temp_file}")
+            except Exception as e:
+                logger.warn(f"Could not clean up temporary file {temp_file}: {e}")
+
 def main():
     parser = argparse.ArgumentParser(
         description=f"Enhanced Neural Audio-to-LLM Tokenizer {VERSION_TAG} - MERT music-optimized codebook initialization",
@@ -5227,7 +5266,7 @@ Examples:
     # Determine codebook initialization method with backward compatibility
     codebook_init_method = args.codebook_init
     if args.use_encodec:
-        print("Warning: --use-encodec is deprecated. Use --codebook-init=encodec instead.")
+        logger.warn("--use-encodec is deprecated. Use --codebook-init=encodec instead.")
         codebook_init_method = "encodec"
 
     # Initialize pipeline with new options
@@ -5254,14 +5293,94 @@ Examples:
         codebook_init_method=codebook_init_method
     )
     
-    # Get input files
+    # Enhanced input handling: stdin bytes, file separators, and interactive mode
     input_files = []
-    if args.stdin:
-        input_files = [line.strip() for line in sys.stdin if line.strip()]
-    elif args.input_files:
-        input_files = args.input_files
-    else:
-        parser.error("No input files provided. Use positional arguments or --stdin")
+    stdin_bytes = None
+    
+    # Check if stdin has data available (non-blocking)
+    def has_stdin_data():
+        if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+            return True
+        return False
+    
+    # Always check for stdin input (no --stdin flag required)
+    if has_stdin_data() or args.stdin:
+        logger.debug("Reading from stdin...")
+        if args.stdin:
+            # Legacy mode: read file paths from stdin
+            input_files = [line.strip() for line in sys.stdin if line.strip()]
+            logger.debug(f"Read {len(input_files)} file paths from stdin")
+        else:
+            # New mode: read arbitrary bytes from stdin
+            stdin_bytes = sys.stdin.buffer.read()
+            logger.debug(f"Read {len(stdin_bytes)} bytes from stdin")
+    
+    # Add command-line file arguments
+    if args.input_files:
+        input_files.extend(args.input_files)
+        logger.debug(f"Added {len(args.input_files)} files from command line")
+    
+    # Interactive mode when no input available
+    if not input_files and stdin_bytes is None:
+        logger.info("No input provided. Entering interactive mode...")
+        logger.info("Type audio data, then press Ctrl+D to process (Ctrl+C to cancel)")
+        
+        # Setup signal handlers for interactive mode
+        def signal_handler(signum, frame):
+            if signum == signal.SIGINT:  # Ctrl+C
+                logger.info("Cancelled by user")
+                sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        try:
+            # Read from stdin in interactive mode
+            stdin_bytes = sys.stdin.buffer.read()
+            logger.debug(f"Interactive input: {len(stdin_bytes)} bytes")
+        except KeyboardInterrupt:
+            logger.info("Cancelled by user")
+            sys.exit(0)
+        except EOFError:
+            logger.info("EOF received")
+            sys.exit(0)
+    
+    # Validate we have some input
+    if not input_files and (stdin_bytes is None or len(stdin_bytes) == 0):
+        parser.error("No input provided. Specify input files as arguments, pipe data to stdin, or use --stdin for file paths.")
+    
+    # Process stdin bytes if we have them
+    if stdin_bytes:
+        # Split on ASCII File Separator (FS, 0x1C) for multiple concatenated files
+        fs_char = b'\x1c'
+        if fs_char in stdin_bytes:
+            byte_chunks = stdin_bytes.split(fs_char)
+            logger.debug(f"Split stdin into {len(byte_chunks)} chunks using FS separator")
+        else:
+            byte_chunks = [stdin_bytes]
+        
+        # Create temporary files for each chunk and add to input_files
+        import tempfile
+        temp_files = []
+        for i, chunk in enumerate(byte_chunks):
+            if len(chunk) == 0:
+                continue
+                
+            # Try to detect file format from magic bytes
+            file_ext = detect_audio_format(chunk)
+            
+            # Create temporary file
+            temp_fd, temp_path = tempfile.mkstemp(suffix=file_ext)
+            try:
+                os.write(temp_fd, chunk)
+            finally:
+                os.close(temp_fd)
+            
+            temp_files.append(temp_path)
+            input_files.append(temp_path)
+            logger.debug(f"Created temporary file {temp_path} ({len(chunk)} bytes, detected as {file_ext})")
+        
+        # Store temp files for cleanup later
+        setattr(pipeline, '_temp_files', temp_files)
     
     # Processing
     if args.batch or len(input_files) > 1:
@@ -5479,6 +5598,12 @@ Examples:
             # Add compat mode warning to evaluation
             if pipeline.compat_mode:
                 logger.warn(f"Evaluation in compatibility mode - results are exploratory only")
+    
+    # Cleanup temporary files
+    try:
+        cleanup_temp_files(pipeline)
+    except Exception as e:
+        logger.debug(f"Error during cleanup: {e}")
 
 
 if __name__ == "__main__":
