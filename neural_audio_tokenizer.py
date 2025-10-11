@@ -292,14 +292,51 @@ def _configure_quiet_external_logging(enable_quiet: bool):
                     from transformers.utils import logging as hf_logging
                     hf_logging.set_verbosity_error()
                     hf_logging.disable_default_handler()
+                    try:
+                        # Explicitly disable transformers progress bars
+                        from transformers.utils.logging import disable_progress_bar
+                        disable_progress_bar()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
+            except Exception:
+                pass
+            # Hugging Face Hub verbosity
+            try:
+                from huggingface_hub.utils import logging as hf_hub_logging
+                hf_hub_logging.set_verbosity_error()
             except Exception:
                 pass
             # Silence urllib3 warnings
             try:
                 import urllib3
                 urllib3.disable_warnings()
+            except Exception:
+                pass
+            # Force-disable tqdm progress bars
+            try:
+                import tqdm as _tqdm
+                def _no_tqdm(iterable=None, *a, **k):
+                    if iterable is None:
+                        class _Dummy:
+                            def update(self, *a, **k): pass
+                            def close(self): pass
+                            def set_description(self, *a, **k): pass
+                            def set_postfix(self, *a, **k): pass
+                            def __enter__(self): return self
+                            def __exit__(self, *exc): pass
+                        return _Dummy()
+                    return iterable
+                try:
+                    _tqdm.tqdm = _no_tqdm  # type: ignore
+                except Exception:
+                    pass
+                try:
+                    from tqdm import auto as _tqdm_auto
+                    _tqdm_auto.tqdm = _no_tqdm  # type: ignore
+                except Exception:
+                    pass
             except Exception:
                 pass
     except Exception:
@@ -5277,6 +5314,12 @@ Examples:
     set_default_mode(default_mode)
     # Suppress external library noise in quiet/default mode
     _configure_quiet_external_logging(default_mode)
+    # If fully quiet default mode, redirect stderr to devnull to suppress any remaining progress bars
+    if default_mode:
+        try:
+            sys.stderr = open(os.devnull, 'w')
+        except Exception:
+            pass
     
     # Handle deprecated arguments with warnings
     if args.sample_rate != 22050 and args.resample is None:
