@@ -1,0 +1,95 @@
+.TH LAM_AUDIO_TOKENS 5 "Oct 2025" "n-a-t v0.1.7" "File Formats"
+.SH NAME
+lam_audio_tokens \- NDJSON streaming format emitted by n\-a\-t
+.SH DESCRIPTION
+This document specifies the NDJSON event stream format produced by \fBn\-a\-t\fR for LLM\-friendly audio tokenization. The stream is a sequence of JSON objects, one per line, with at least a \fBheader\fR event, many \fBframe\fR events, and a final \fBend\fR event.
+.SH HEADER EVENT
+.PP
+Example:
+.nf
+{"event":"header","format_version":"1.5","schema":"lam_audio_tokens",
+ "model_id":"tims-ears-v0.1.7.mert","codebook_id":"tims-ears-v0.1.7.mert-cb-4096",
+ "sr":22050,"hop":512,"hop_ms":23.22,"frames_per_second":43.066,
+ "encoding_mode":"rle","time_units":"ms","start_ts":0.0,
+ "layers":[{"name":"S0","type":"semantic","vocab":4096,"encoding":"rle"}, ...],
+ "duration_seconds":12.345,
+ "audio_sha256":"...",
+ "metadata":{"file_path":"/path/song.wav","processing_sample_rate":22050}}
+.fi
+.TP
+Fields
+.RS
+.TP
+.B format_version
+Semantic version of the stream format ("1.5" with MERT integration).
+.TP
+.B schema
+Always \fBlam_audio_tokens\fR.
+.TP
+.B model_id , codebook_id
+Identifiers embedding version and codebook configuration.
+.TP
+.B sr , hop , hop_ms , frames_per_second
+Sampling and frame timing metadata.
+.TP
+.B encoding_mode
+\fBrle\fR or \fBdense\fR default. Per\-layer overrides live in \fBlayers\fR.
+.TP
+.B layers
+Array describing semantic (\fBS*\fR) and acoustic (\fBA*\fR) layers: name, type, vocab size, and encoding.
+.TP
+.B duration_seconds , audio_sha256 , metadata
+Optional; file duration, integrity hash, and auxiliary metadata.
+.RE
+.SH FRAME EVENT
+.PP
+Each frame carries tokens for all layers. With RLE, frames may be aggregated across time; the implementation emits dense frames on keyframes and changes.
+.PP
+Example (dense):
+.nf
+{"event":"frame","fi":37,"ts":861.3,"dur":23.22,
+ "S":[112,49,7,0],"A":[928,227,15,3]}
+.fi
+.TP
+Fields
+.RS
+.TP
+.B fi
+Frame index (0\-based).
+.TP
+.B ts , dur
+Timestamp and per\-frame duration in milliseconds.
+.TP
+.B S , A
+Arrays of token indices for semantic (S) and acoustic (A) layers. Layer counts are fixed per stream (from the header). Missing or extra tokens MUST be padded/truncated by producers.
+.TP
+.B is_keyframe
+Present and true on keyframes.
+.TP
+.B aux
+Optional auxiliary data.
+.RE
+.SH END EVENT
+.PP
+Example:
+.nf
+{"event":"end","frames":528,
+ "stats":{"compression_ratio":214.2,"token_diversity":0.63, ...}}
+.fi
+.TP
+Fields
+.RS
+.TP
+.B frames
+Total frame count emitted.
+.TP
+.B stats
+Final metrics and budget information (keys may evolve; producers SHOULD include stable names as available).
+.RE
+.SH RLE AGGREGATION
+When \fBrle\fR is active for a layer, producers may buffer unchanged tokens and emit a single frame summarizing the run (with \fBdur\fR reflecting aggregate duration). Keyframes force emission of a full dense state across all layers.
+.SH COMPATIBILITY MODE
+In compatibility mode, producers SHOULD set \fBcompat_mode\fR=true in the header and MAY include a \fBwarning\fR string. Tokens in this mode are exploratory/noise and not derived from trained quantizers.
+.SH SEE ALSO
+\fBneural_audio_tokenizer(1)\fR, \fBneural_audio_tokenizer(3)\fR
+

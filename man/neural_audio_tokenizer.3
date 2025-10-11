@@ -1,0 +1,152 @@
+.TH NEURAL_AUDIO_TOKENIZER 3 "Oct 2025" "n-a-t v0.1.7" "Library Interfaces"
+.SH NAME
+neural_audio_tokenizer \- Python API for n\-a\-t ("Tim's Ears")
+.SH SYNOPSIS
+.nf
+import neural_audio_tokenizer as nat
+
+# High\-level pipeline
+pipeline = nat.AudioTokenizationPipeline(...)
+result = pipeline.process_audio("file.wav", ndjson_streaming=True)
+
+# Low\-level model
+model = nat.NeuralAudioTokenizer(...)
+sem, acc = model.encode(waveform, actual_sample_rate=sr)
+.fi
+.SH DESCRIPTION
+The \fBneural_audio_tokenizer\fR module provides a research\-grade tokenization pipeline and model for converting audio into multi\-layer semantic/acoustic token sequences suitable for LLM consumption.
+.PP
+This library is not a codec. Reconstruction and compatibility components are placeholders producing stochastic/entropy outputs; they do not map back to input audio and are present primarily for research scaffolding and for replacing with custom, real codec components in forks.
+.SH CONSTANTS
+.TP
+.B VERSION
+Current version string, e.g., "0.1.7".
+.TP
+.B VERSION_TAG
+Version tag, e.g., "v0.1.7".
+.SH CLASSES
+.SS AudioTokenizationPipeline
+.B class AudioTokenizationPipeline(
+    sample_rate: int = 22050,
+    model_config: dict | None = None,
+    device: str = "auto",
+    enable_compat_fallback: bool = True,
+    resample_rate: int | None = None,
+    rle_mode: bool = False,
+    model_id: str = f"tims-ears-{VERSION}.mert",
+    per_layer_encoding: dict[str,str] | None = None,
+    keyframe_interval_seconds: float = 5.0,
+    include_legend: bool = True,
+    enable_reconstruction: bool = True,
+    use_encodec_bridge: bool = False,
+    deterministic: bool = False,
+    deterministic_seed: int = 42,
+    codebook_cache_dir: str | None = None,
+    enable_codebook_cache: bool = True,
+    force_reinit_codebooks: bool = False,
+    codebook_init_method: str = "mert",
+    codebook_size: int = 4096
+)
+.TP
+Constructs the full pipeline (I/O, model, streaming, evaluation).
+.TP
+.B process_audio(file_path: str, output_format: str = "hierarchical", enable_reconstruction: bool | None = None, streaming_mode: bool = False, ndjson_streaming: bool = False) -> dict
+Run the pipeline on a single file. Returns a dict with keys including: \fBsemantic_codes\fR, \fBacoustic_codes\fR, \fBreconstructed\fR, \fBnum_frames\fR, \fBtext_tokens\fR, \fBjson_tokens\fR, \fBndjson_output\fR, \fBstreaming_output\fR, \fBmetadata\fR, \fBmetrics\fR, \fBbudget_metrics\fR.
+.TP
+.B batch_process(files: list[str], output_dir: str, output_format: str, sequential_vis: bool = False) -> list[dict]
+Process many files, saving artifacts into \fIoutput_dir\fR.
+.TP
+.B load_audio(file_path: str, target_length: int | None = None) -> (np.ndarray, int)
+Load audio (librosa/torchaudio/soundfile fallback). Preserves native SR unless \fBresample_rate\fR set. Raw chunks (no header) are interpreted as 16\-bit PCM at pipeline's default SR.
+.TP
+Key properties: \fBsample_rate\fR, \fBmodel_id\fR, \fBcompat_mode\fR, \fBstreaming\fR (StreamingProtocol), \fBformatter\fR (TokenFormatter), \fBevaluator\fR (TokenizationEvaluator).
+.SS NeuralAudioTokenizer
+.B class NeuralAudioTokenizer(
+    sample_rate: int = 22050,
+    semantic_dim: int = 512,
+    acoustic_dim: int = 512,
+    codebook_size: int = 4096,
+    num_quantizers: int = 8,
+    n_mels: int = 128,
+    hop_length: int = 512,
+    enable_reconstruction: bool = True,
+    use_encodec_bridge: bool = False,
+    encodec_model: str = "facebook/encodec_24khz",
+    codebook_cache_dir: pathlib.Path | None = None,
+    enable_codebook_cache: bool = True,
+    force_reinit_codebooks: bool = False,
+    model_id: str = f"tims-ears-{VERSION}.mert",
+    codebook_init_method: str = "mert"
+)
+.TP
+Core neural tokenizer combining semantic and acoustic paths with residual VQ. \fBcodebook_init_method=\fR\fImert\fR is the only supported production path; other initializers are legacy.
+.TP
+.B forward(waveform: torch.Tensor, actual_sample_rate: int | None = None) -> dict
+Compute features, quantize to codes, and optionally run a placeholder decoder. Returns a dict with \fBsemantic_codes\fR (list[tensor]), \fBacoustic_codes\fR (list[tensor]), \fBreconstructed\fR (tensor|None), \fBnum_frames\fR, feature tensors, and loss components.
+.TP
+.B encode(waveform: torch.Tensor, actual_sample_rate: int | None = None) -> (list[torch.Tensor], list[torch.Tensor])
+Return only semantic/acoustic codes.
+.TP
+.B decode_tokens(semantic_codes, acoustic_codes) -> torch.Tensor
+Decode using the placeholder decoder if enabled. Not a real codec.
+.SS ResidualVectorQuantizer
+.B class ResidualVectorQuantizer(input_dim: int, codebook_size: int, num_quantizers: int)
+.TP
+Residual vector quantizer with EMA updates. Public methods:
+.RS
+.TP
+.B encode(x: torch.Tensor) -> (codes: list[torch.Tensor], features: torch.Tensor)
+Quantize inputs across residual stages.
+.TP
+.B decode(codes: list[torch.Tensor]) -> torch.Tensor
+Reconstruct features from code indices.
+.TP
+.B initialize_from_mert_model(model_name: str = "m-a-p/MERT-v1-95M", ...)
+Initialize codebooks from a MERT model; music\-optimized and recommended.
+.TP
+.B initialize_from_encodec(\&...) , initialize_from_encodec_weights(\&...)
+Legacy/experimental initializers; not expected to work out\-of\-the\-box.
+.RE
+.SS VectorQuantizer
+Lower\-level EMA vector quantizer. Methods: \fBforward\fR, \fBdecode\fR.
+.SS Encoders
+.TP
+.B MelResidualEncoder
+Speech/music agnostic mel\-based encoder with residual blocks. Methods: \fBforward\fR.
+.TP
+.B SemanticAudioEncoder
+Optional Wav2Vec2\-based semantic encoder (falls back to spectral features if unavailable). Methods: \fBforward\fR.
+.TP
+.B MultiScaleTemporalEncoder
+Temporal aggregation across multiple receptive fields. Methods: \fBforward\fR.
+.SS Streaming and Formatting
+.TP
+.B NDJSONStreamer
+Builds NDJSON header/frame/end events with optional RLE for semantic layers. Methods: \fBcreate_header\fR, \fBcreate_frame\fR, \fBcreate_end_marker\fR.
+.TP
+.B StreamingProtocol
+High\-level NDJSON stream builder. Methods: \fBcreate_stream_header\fR, \fBcreate_chunk_marker\fR, \fBcreate_stream_footer\fR, \fBcreate_ndjson_stream\fR.
+.TP
+.B TokenFormatter
+Convert codes into text or JSON dumps. Methods: \fBto_text_sequence\fR, \fBto_json\fR.
+.SS Evaluation
+.TP
+.B TokenizationEvaluator
+Computes research metrics (compression, entropy, MR\-STFT, etc.) and can generate visualizations/analyses. Primary method: \fBevaluate_tokenization\fR.
+.SS Dataclasses and Metrics
+.TP
+.B TokenizationMetrics
+Fields include: \fBnum_semantic_tokens\fR, \fBnum_acoustic_tokens\fR, \fBcompression_ratio\fR, \fBtoken_diversity\fR, \fBmse_loss\fR, \fBspectral_loss\fR, \fBmr_stft_loss\fR, \fBlog_spectral_distance\fR, \fBsemantic_entropy\fR, \fBacoustic_entropy\fR, \fBmutual_information\fR, \fBpitch_accuracy\fR, \fBrhythm_accuracy\fR, \fBtimbral_similarity\fR, \fBencoding_time\fR, \fBdecoding_time\fR, \fBmemory_usage\fR, \fBtokens_per_second\fR, \fBframes_per_second\fR.
+.TP
+.B TokenBudgetMetrics
+Fields include: \fBtotal_tokens\fR, \fBsemantic_tokens\fR, \fBacoustic_tokens\fR, \fBtokens_per_second\fR, \fBframes_per_second\fR, \fBcompression_ratio\fR, \fBprocessing_time\fR, \fBaudio_frames_per_second\fR, \fBaudio_tokens_per_second\fR, \fBprocessing_frames_per_second\fR, \fBprocessing_tokens_per_second\fR.
+.SH NOTES
+- Codebook initialization: \fBmert\fR is the supported path. Other initializers are legacy/experimental.
+- Reconstruction and compatibility are non\-semantic noise/entropy generators; not suitable for codec or analysis.
+.SH AUTHOR
+Authors: as listed in the script header. Maintainer: Jeremy Carter <jeremy@jeremycarter.ca>.
+.SH LICENSE
+MIT License.
+.SH SEE ALSO
+\fBneural_audio_tokenizer(1)\fR, \fBlam_audio_tokens(5)\fR
+
