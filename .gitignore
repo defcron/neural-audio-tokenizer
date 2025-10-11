@@ -206,5 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-README.docx
-README.pdf
+*.output-dir/
+01-Atomic_Beluga-remastered.wav
+03-Eggdrop-remastered.wav

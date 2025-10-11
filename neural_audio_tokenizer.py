@@ -85,6 +85,7 @@ import select
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Union, Any
 import warnings
+import builtins as _builtins
 import base64
 from pathlib import Path
 import tempfile
@@ -209,8 +210,28 @@ class NeuralAudioLogger:
             self._log_to_stderr(f"📊 {message}", LogLevel.INFO)
     
     def stdout(self, message: str):
-        """Direct stdout output - always shown"""
-        print(message, file=sys.stdout)
+        """Direct stdout output - always shown, bypasses print override"""
+        try:
+            sys.stdout.write(message + ("\n" if not message.endswith("\n") else ""))
+            sys.stdout.flush()
+        except Exception:
+            # Fallback to builtins.print in case stdout was tampered
+            _builtins.print(message)
+
+# Global print override to prevent stdout noise in default NDJSON mode
+# and route incidental prints to stderr otherwise.
+def print(*args, **kwargs):  # type: ignore[override]
+    """Module-wide print override.
+
+    - In default NDJSON mode (logger.default_mode == True), suppress all prints.
+    - Otherwise, print to stderr by default to avoid polluting stdout.
+    - Calls builtins.print under the hood.
+    """
+    if 'file' not in kwargs:
+        if 'logger' in globals() and isinstance(logger, NeuralAudioLogger) and logger.default_mode:
+            return  # suppress entirely in default mode
+        kwargs['file'] = sys.stderr
+    return _builtins.print(*args, **kwargs)
 
 # Stream locking context manager for ensuring NDJSON stream integrity
 class StreamLock:
@@ -250,6 +271,40 @@ def set_default_mode(enabled: bool):
     """Enable/disable default mode (NDJSON only to stdout)"""
     global logger
     logger.default_mode = enabled
+
+
+# External logging/progress suppression for quiet default mode
+def _configure_quiet_external_logging(enable_quiet: bool):
+    """Reduce output from third-party libraries when quiet/default mode is enabled."""
+    try:
+        if enable_quiet:
+            os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
+            os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
+            os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
+            os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+            os.environ.setdefault('DISABLE_TQDM', '1')
+            os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
+            os.environ.setdefault('TORCH_CPP_LOG_LEVEL', 'OFF')
+            # Transformers verbosity
+            try:
+                import transformers
+                try:
+                    from transformers.utils import logging as hf_logging
+                    hf_logging.set_verbosity_error()
+                    hf_logging.disable_default_handler()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Silence urllib3 warnings
+            try:
+                import urllib3
+                urllib3.disable_warnings()
+            except Exception:
+                pass
+    except Exception:
+        # Never let quieting cause failures
+        pass
 
 # ============================================================================
 # FIXED v0.1.x: Progress Reporting System
@@ -5220,6 +5275,8 @@ Examples:
     # Configure logger
     set_log_level(log_level)
     set_default_mode(default_mode)
+    # Suppress external library noise in quiet/default mode
+    _configure_quiet_external_logging(default_mode)
     
     # Handle deprecated arguments with warnings
     if args.sample_rate != 22050 and args.resample is None:
@@ -5418,61 +5475,75 @@ Examples:
         # Store temp files for cleanup later
         setattr(pipeline, '_temp_files', temp_files)
     
-    # Processing
-    if args.batch or len(input_files) > 1:
-        # Batch processing
+    # Decide multi-input behavior
+    multi_input = len(input_files) > 1
+    
+    # Case A: Save-to-dir batch only when explicitly requested (--all-outputs or --output-dir)
+    if (args.batch or multi_input) and (args.all_outputs or args.output_dir):
         if not args.output_dir:
-            parser.error("--output-dir required for batch processing")
+            parser.error("--output-dir is required when using --all-outputs with multiple inputs")
         
         results = pipeline.batch_process(
-            input_files, 
-            args.output_dir, 
+            input_files,
+            args.output_dir,
             args.format,
             sequential_vis=args.seq_vis
         )
         
-        # Summary statistics
+        # Aggregate metrics optionally
         successful = [r for r in results if 'error' not in r]
-        failed = [r for r in results if 'error' in r]
-        
-        logger.info(f"Batch processing complete:")
-        logger.info(f"  Successful: {len(successful)}")
-        logger.info(f"  Failed: {len(failed)}")
-        
-        # Report generated files
-        if successful:
-            total_viz_files = sum(len(r.get('generated_files', {}).get('visualizations', {})) for r in successful)
-            total_analysis_files = sum(len(r.get('generated_files', {}).get('analysis_files', {})) for r in successful)
-            logger.info(f"  Generated {total_viz_files} visualization files")
-            logger.info(f"  Generated {total_analysis_files} analysis files")
-        
-        # Aggregate metrics
         if args.metrics and successful:
             avg_metrics = {}
             metric_keys = list(asdict(successful[0]['metrics']).keys())
             budget_keys = list(asdict(successful[0]['budget_metrics']).keys())
-            
             for key in metric_keys + budget_keys:
                 if key in metric_keys:
                     values = [asdict(r['metrics'])[key] for r in successful 
-                             if isinstance(asdict(r['metrics'])[key], (int, float))]
+                              if isinstance(asdict(r['metrics'])[key], (int, float))]
                 else:
                     values = [asdict(r['budget_metrics'])[key] for r in successful 
-                             if isinstance(asdict(r['budget_metrics'])[key], (int, float))]
-                
+                              if isinstance(asdict(r['budget_metrics'])[key], (int, float))]
                 if values:
                     avg_metrics[f"avg_{key}"] = sum(values) / len(values)
                     avg_metrics[f"min_{key}"] = min(values)
                     avg_metrics[f"max_{key}"] = max(values)
-            
-            # Add compat mode flag to metrics
             if pipeline.compat_mode:
                 avg_metrics["compat_mode"] = True
                 avg_metrics["warning"] = "Metrics from compatibility mode - tokens not from trained quantizers"
-            
             with open(args.metrics, 'w') as f:
                 json.dump(avg_metrics, f, indent=2)
-        
+    
+    # Case B: Stream each input to stdout sequentially (default for multiple inputs)
+    elif multi_input:
+        for path in input_files:
+            try:
+                result = pipeline.process_audio(
+                    path,
+                    output_format=args.format,
+                    enable_reconstruction=args.reconstruction or enable_reconstruction,
+                    streaming_mode=args.streaming,
+                    ndjson_streaming=args.ndjson_streaming
+                )
+                # Choose NDJSON if available
+                output_text = None
+                if args.ndjson_streaming and result['ndjson_output']:
+                    output_text = result['ndjson_output']
+                elif args.streaming and result['streaming_output']:
+                    output_text = result['streaming_output']
+                else:
+                    output_text = result['text_tokens']
+                if output_text is not None:
+                    # Ensure NDJSON to stdout with locking if not fully quiet
+                    use_stream_lock = (args.ndjson_streaming and not default_mode)
+                    if use_stream_lock:
+                        with StreamLock(lock_stderr=True):
+                            logger.stdout(output_text)
+                    else:
+                        logger.stdout(output_text)
+            finally:
+                cleanup_cuda_memory()
+    
+    # Case C: Single input (original path)
     else:
         # Single file processing
         result = pipeline.process_audio(

@@ -1,0 +1,171 @@
+.\" neural_audio_tokenizer(1) 
+.TH NEURAL_AUDIO_TOKENIZER 1 "Oct 2025" "n-a-t v0.1.7" "User Commands"
+.SH NAME
+neural_audio_tokenizer \- neural audio tokenization CLI for LLMs ("Tim's Ears")
+.SH SYNOPSIS
+.B neural_audio_tokenizer.py
+[\fIOPTIONS\fR] [\fIFILE\fR ...]
+.br
+.B cat
+\fIFILE\fR | \fBneural_audio_tokenizer.py\fR [\fIOPTIONS\fR]
+.br
+.B printf
+"..." | \fBneural_audio_tokenizer.py\fR [\fIOPTIONS\fR]
+.SH DESCRIPTION
+\fBn\-a\-t\fR is a research\-grade neural audio tokenizer designed for general\-purpose LLMs to reason about sound and music. It emits an LLM\-friendly NDJSON stream encoding multi\-layer semantic and acoustic tokens over time.
+.PP
+This tool is not an encoder/decoder or reversible codec. Reconstruction and compatibility modes are placeholders intended for generating stochastic noise/entropy streams and for scaffolding future custom forks. They do not map outputs to inputs and should be treated as non\-informative for audio recovery or analysis.
+.PP
+The default behavior produces only NDJSON tokens on stdout with all other output suppressed. Multi\-file inputs are supported via CLI arguments or a single stdin stream with ASCII File Separator (FS, 0x1C) delimiters.
+.SH DEFAULTS
+- Output: NDJSON streaming to stdout only (no extra logging).
+- Codebook init: \fBmert\fR (music\-optimized) is the only supported, production path.
+- Sample rate: preserves native input SR unless \fB\-\-resample\fR is specified (bare flag implies 22050 Hz).
+- Reconstruction: flag \fB\-\-no\-reconstruction\fR disables a placeholder decoder (not a real codec).
+- Compatibility mode: produces exploratory/noise tokens if ML dependencies are missing.
+.SH OPTIONS
+.TP
+.BR \-o , " \-\-output "=FILE
+Write output to FILE (single\-input only). Default: stdout.
+.TP
+.BR \-\-output\-dir "=DIR"
+Directory for saving multi\-artifact outputs (used with \fB\-\-all\-outputs\fR). Not required for multi\-file streaming.
+.TP
+.BR \-\-all\-outputs
+For each input, write text, JSON, NDJSON, metrics, visualizations, and optional reconstruction into \fI\-\-output\-dir\fR.
+.TP
+.BR \-\-format "=hierarchical|interleaved|structured"
+Text formatting for token dumps (non\-NDJSON). Default: hierarchical.
+.TP
+.BR \-\-ndjson\-streaming
+Emit NDJSON streaming format (default unless other outputs explicitly requested).
+.TP
+.BR \-\-rle
+Prefer RLE for semantic layers in NDJSON; acoustic layers default to dense. See \fBlam_audio_tokens(5)\fR.
+.TP
+.BR \-\-chunk\-size "=N"
+Streaming chunk size. Default: 8192.
+.TP
+.BR \-\-model\-id "=STR"
+Model identifier embedded in NDJSON. Default: \fItims\-ears\-v0.1.7.mert\fR.
+.TP
+.BR \-\-keyframe\-interval "=SEC"
+Keyframe interval (RLE). Default: 5.0.
+.TP
+.BR \-\-encoding "=SPEC"
+Layer\-specific encoding, e.g., \fBS=rle,A=dense\fR or \fBS0=rle,S1=rle,A0=dense\fR.
+.TP
+.BR \-\-rle\-semantic
+Force RLE for all semantic layers.
+.TP
+.BR \-\-dense\-acoustic
+Force dense encoding for all acoustic layers.
+.TP
+.BR \-\-no\-legend
+Omit legend from NDJSON header.
+.TP
+.BR \-\-codebook\-init "=mert|encodec|random"
+Initialization method. \fBmert\fR is the only fully supported/maintained path. \fBencodec\fR and \fBrandom\fR are legacy and not expected to work out\-of\-the\-box.
+.TP
+.BR \-\-codebook\-cache\-dir "=DIR"
+Codebook cache directory. Default: \fI~/.cache/neural_audio_tokenizer/codebooks\fR.
+.TP
+.BR \-\-no\-codebook\-cache
+Disable codebook caching.
+.TP
+.BR \-\-force\-reinit\-codebooks
+Re\-initialize codebooks ignoring cache.
+.TP
+.BR \-\-no\-reconstruction
+Disable placeholder decoder.
+.TP
+.BR \-\-use\-encodec
+Deprecated; equivalent to \fB\-\-codebook\-init=encodec\fR.
+.TP
+.BR \-\-encodec\-model "=ID"
+Encodec model identifier (legacy).
+.TP
+.BR \-\-deterministic
+Deterministic mode.
+.TP
+.BR \-\-seed "=N"
+Random seed. Default: 42.
+.TP
+.BR \-\-resample "[=HZ]"
+Resample to HZ; bare flag implies 22050 Hz. If omitted, native sample rate is preserved.
+.TP
+.BR \-\-hop\-length "=N"
+STFT hop. Default: 512.
+.TP
+.BR \-\-n\-mels "=N"
+Mel bands. Default: 128.
+.TP
+.BR \-\-semantic\-dim "=N", " \-\-acoustic\-dim "=N, " \-\-codebook\-size "=N, " \-\-num\-quantizers "=N
+Model widths and quantizer configuration.
+.TP
+.BR \-\-evaluate
+Compute and emit evaluation metrics (research).
+.TP
+.BR \-\-metrics "=FILE"
+Write metrics JSON to FILE.
+.TP
+.BR \-\-budget\-report
+Emit token budget stats to stderr (non\-default mode).
+.TP
+.BR \-\-seq\-vis
+Generate visualizations sequentially to save memory (when saving outputs).
+.TP
+.BR \-\-device "=auto|cpu|cuda"
+Select device. Default: auto.
+.TP
+.BR \-\-max\-length "=SAMPLES"
+Trim/pad to target length.
+.TP
+.BR \-\-compat\-fallback
+Force compatibility mode (exploratory/noise tokens only).
+.TP
+.BR \-\-model\-path "=PATH", " \-\-config "=FILE
+Load model or configuration from files.
+.TP
+.BR \-\-log\-level "=DEBUG|INFO|WARN|ERROR"
+Logging level. Default: WARN. In default NDJSON mode, incidental logs are suppressed.
+.TP
+.BR \-v , " \-\-verbose"
+Equivalent to \fB\-\-log\-level INFO\fR.
+.SH INPUT MODES
+.TP
+Files
+One or more files as positional arguments. Multiple files stream sequential NDJSON on stdout by default.
+.TP
+Stdin
+Raw bytes on stdin are treated as a sequence of files, split at ASCII FS (0x1C). Each chunk is detected by magic bytes; if no header is found, it is interpreted as 16\-bit PCM at 22050 Hz.
+.TP
+Interactive
+With no files and no stdin, \fBn\-a\-t\fR reads from the terminal until EOF (Ctrl\-D), supporting FS\-separated chunks.
+.SH OUTPUT
+NDJSON stream with \fBheader\fR, \fBframe\fR, and \fBend\fR events. See \fBlam_audio_tokens(5)\fR for schema. Non\-NDJSON outputs (text/JSON) are available when explicitly requested.
+.SH EXAMPLES
+.nf
+# Stream NDJSON (default)
+neural_audio_tokenizer.py song.wav > tokens.ndjson
+
+# Multiple files, one NDJSON after another
+neural_audio_tokenizer.py a.wav b.flac > out.ndjson
+
+# Stdin with FS separators
+cat a.wav $'\x1c' b.mp3 | neural_audio_tokenizer.py > out.ndjson
+
+# Save all artifacts per file
+neural_audio_tokenizer.py *.wav --all-outputs --output-dir out/
+.fi
+.SH ENVIRONMENT
+Internally sets: \fBHF_HUB_DISABLE_PROGRESS_BARS=1\fR, \fBTRANSFORMERS_VERBOSITY=error\fR, \fBDISABLE_TQDM=1\fR, and related flags in default mode to keep stdout clean.
+.SH FILES
+\fI~/.cache/neural_audio_tokenizer/codebooks\fR \- default codebook cache directory.
+.SH AUTHOR
+Authors: as listed in the script header. Maintainer: Jeremy Carter <jeremy@jeremycarter.ca>.
+.SH LICENSE
+MIT License.
+.SH SEE ALSO
+\fBneural_audio_tokenizer(3)\fR, \fBlam_audio_tokens(5)\fR
+

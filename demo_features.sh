@@ -1,7 +1,24 @@
 #!/bin/bash
 
-echo "🎵 Neural Audio Tokenizer - Enhanced Features Demo"
+echo "🎵 Neural Audio Tokenizer - Enhanced Features Demo (run this script with the '--online' flag to fetch optional .wav file songs from Internet Archive for further manual testing and demo)"
 echo "=================================================="
+
+if [ $# -gt 0 -a "$1" == "--online" ]; then
+    echo "Online mode: Fetching some Ellipsis (Remastered Deluxe) by Telephone Sound album .wav songs from archive.org for demo"
+    curl -vLo 01-Atomic_Beluga-remastered.wav https://archive.org/serve/telephone-sound-ellipsis-remastered-deluxe/01-Atomic_Beluga-remastered.wav || wget -v https://archive.org/serve/telephone-sound-ellipsis-remastered-deluxe/01-Atomic_Beluga-remastered.wav
+    if [ $? -eq 0 ]; then
+        export N_A_T_IA_SONG_1="01-Atomic_Beluga-remastered.wav"
+
+	echo "Successfully fetched CC-BY-SA Licensed \$N_A_T_IA_SONG_1 .wav file song from Internet Archive for further optional manual testing and demo: https://archive.org/serve/telephone-sound-ellipsis-remastered-deluxe/01-Atomic_Beluga-remastered.wav"
+    fi
+
+    curl -vLo 03-Eggdrop-remastered.wav https://archive.org/serve/telephone-sound-ellipsis-remastered-deluxe/03-Eggdrop-remastered.wav || wget -v https://archive.org/serve/telephone-sound-ellipsis-remastered-deluxe/03-Eggdrop-remastered.wav
+    if [ $? -eq 0 ]; then
+        export N_A_T_IA_SONG_2="03-Eggdrop-remastered.wav"
+
+	echo "Successfully fetched CC-BY-SA Licensed \$N_A_T_IA_SONG_2 .wav file song from Internet Archive for further optional manual testing and demo: https://archive.org/serve/telephone-sound-ellipsis-remastered-deluxe/03-Eggdrop-remastered.wav"
+    fi
+fi
 
 echo ""
 echo "📋 1. Testing Version Management System"
