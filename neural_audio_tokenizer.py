@@ -4760,6 +4760,11 @@ class AudioTokenizationPipeline:
                 original_sr = self.original_sample_rate  # Fallback assumption
             except Exception as e:
                 raise RuntimeError(f"Could not load audio file {file_path}. Tried all available backends. Last error: {last_error}")
+
+        # Guard against zero-length audio early to avoid numpy reduction errors
+        if audio is None or len(audio) == 0:
+            raise RuntimeError(
+                f"Empty or invalid audio data in '{file_path}'. If providing stdin, ensure non-empty chunks and correct separators.")
         
         # FIXED v0.1.1: Resample only if --resample flag was used
         final_sr = original_sr
@@ -4776,7 +4781,7 @@ class AudioTokenizationPipeline:
                 final_sr = target_sr
                 print(f"Resampled from {original_sr} Hz to {target_sr} Hz")
         
-        # Normalize
+        # Normalize (safe for non-empty audio)
         audio = audio / (np.abs(audio).max() + 1e-8)
         
         # Truncate or pad to target length
@@ -5171,6 +5176,51 @@ def detect_audio_format(data: bytes) -> str:
     # Default to raw audio
     return '.raw'
 
+def _looks_like_text(data: bytes, sample_size: int = 4096) -> bool:
+    """Heuristically decide if a byte buffer is mostly text-like.
+
+    - Any NUL bytes => binary
+    - Compute ratio of printable ASCII (including whitespace) in a sample
+    - If printable ratio >= 0.85, consider it text
+    """
+    if not data:
+        return True  # empty treated as text-like so higher layers can decide
+    if b"\x00" in data:
+        return False
+    sample = data[:sample_size]
+    printable = bytes({7,8,9,10,12,13,27} | set(range(32, 127)))
+    printable_count = sum(b in printable for b in sample)
+    return (printable_count / max(1, len(sample))) >= 0.85
+
+def _split_fs_chunks(data: bytes) -> list:
+    """Split a bytestream by ASCII FS (0x1C) and drop empty edge chunks.
+
+    - Works whether or not the stream ends with FS
+    - Preserves interior empty chunks (rare) only if they contain non-whitespace
+    """
+    fs_char = b"\x1c"
+    if fs_char in data:
+        parts = data.split(fs_char)
+    else:
+        parts = [data]
+    chunks = []
+    for part in parts:
+        # Drop chunks that are effectively blank (just whitespace/newlines)
+        if not part:
+            continue
+        if part.strip(b"\r\n\t \x00") == b"":
+            continue
+        chunks.append(part)
+    return chunks
+
+def _read_stdin_bytes() -> bytes:
+    """Read all bytes from stdin.buffer until EOF without decoding.
+
+    This avoids text decoding errors when binary is piped and ensures
+    consistent behavior across platforms.
+    """
+    return sys.stdin.buffer.read()
+
 def cleanup_temp_files(pipeline):
     """Clean up temporary files created from stdin"""
     if hasattr(pipeline, '_temp_files'):
@@ -5429,56 +5479,71 @@ Examples:
         codebook_init_method=codebook_init_method
     )
     
-    # Enhanced input handling: stdin bytes, file separators, and interactive mode
-    input_files = []
-    stdin_bytes = None
-    
-    # Check if stdin has data available (non-blocking)
-    def has_stdin_data():
-        if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
-            return True
-        return False
-    
-    # Always check for stdin input (no --stdin flag required)
-    if has_stdin_data() or args.stdin:
-        logger.debug("Reading from stdin...")
-        if args.stdin:
-            # Legacy mode: read file paths from stdin
-            input_files = [line.strip() for line in sys.stdin if line.strip()]
+    # Enhanced input handling: stdin bytes, FS splitting, and interactive mode
+    input_files: List[str] = []
+    stdin_bytes: Optional[bytes] = None
+
+    # Prefer a robust, portable check for piped input
+    def has_piped_stdin() -> bool:
+        try:
+            return not sys.stdin.isatty()
+        except Exception:
+            # Fallback to select if TTY check is unavailable
+            try:
+                return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
+            except Exception:
+                return False
+
+    # In all cases, avoid decoding stdin as text unless explicitly intended
+    if args.stdin:
+        # Legacy mode: expect newline-delimited file paths on stdin.
+        # But be tolerant: if the stream looks binary, treat it as raw bytes instead.
+        logger.debug("Reading file paths (legacy --stdin) from stdin...")
+        raw = _read_stdin_bytes()
+        if _looks_like_text(raw):
+            try:
+                text = raw.decode(errors='ignore')
+            except Exception:
+                text = ""
+            input_files = [line.strip() for line in text.splitlines() if line.strip()]
             logger.debug(f"Read {len(input_files)} file paths from stdin")
         else:
-            # New mode: read arbitrary bytes from stdin
-            stdin_bytes = sys.stdin.buffer.read()
-            logger.debug(f"Read {len(stdin_bytes)} bytes from stdin")
+            stdin_bytes = raw
+            logger.debug(f"Read {len(stdin_bytes)} bytes from stdin (binary mode fallback)")
+    elif has_piped_stdin():
+        # No flag: treat piped stdin as raw bytes for audio or arbitrary data
+        logger.debug("Reading binary data from stdin (piped input)...")
+        stdin_bytes = _read_stdin_bytes()
+        logger.debug(f"Read {len(stdin_bytes)} bytes from stdin")
     
     # Add command-line file arguments
     if args.input_files:
         input_files.extend(args.input_files)
         logger.debug(f"Added {len(args.input_files)} files from command line")
     
-    # Interactive mode when no input available
+    # Interactive mode when no files and no piped stdin
     if not input_files and stdin_bytes is None:
         logger.info("No input provided. Entering interactive mode...")
-        logger.info("Type audio data, then press Ctrl+D to process (Ctrl+C to cancel)")
-        
+        logger.info("Paste/enter data, press Ctrl+D to process (Ctrl+C to cancel)")
+
         # Setup signal handlers for interactive mode
         def signal_handler(signum, frame):
             if signum == signal.SIGINT:  # Ctrl+C
                 logger.info("Cancelled by user")
                 sys.exit(0)
-        
+
         signal.signal(signal.SIGINT, signal_handler)
-        
+
         try:
-            # Read from stdin in interactive mode
-            stdin_bytes = sys.stdin.buffer.read()
-            logger.debug(f"Interactive input: {len(stdin_bytes)} bytes")
+            # Read all input until EOF. Supports multi-line data; Enter does not advance processing.
+            stdin_bytes = _read_stdin_bytes()
+            logger.debug(f"Interactive input: {len(stdin_bytes) if stdin_bytes else 0} bytes")
         except KeyboardInterrupt:
             logger.info("Cancelled by user")
             sys.exit(0)
         except EOFError:
-            logger.info("EOF received")
-            sys.exit(0)
+            # No data entered; treat as no input
+            stdin_bytes = b""
     
     # Validate we have some input
     if not input_files and (stdin_bytes is None or len(stdin_bytes) == 0):
@@ -5487,34 +5552,32 @@ Examples:
     # Process stdin bytes if we have them
     if stdin_bytes:
         # Split on ASCII File Separator (FS, 0x1C) for multiple concatenated files
-        fs_char = b'\x1c'
-        if fs_char in stdin_bytes:
-            byte_chunks = stdin_bytes.split(fs_char)
-            logger.debug(f"Split stdin into {len(byte_chunks)} chunks using FS separator")
-        else:
-            byte_chunks = [stdin_bytes]
-        
+        byte_chunks = _split_fs_chunks(stdin_bytes)
+        logger.debug(f"Prepared {len(byte_chunks)} chunk(s) from stdin using FS-aware splitting")
+
         # Create temporary files for each chunk and add to input_files
         import tempfile
-        temp_files = []
+        temp_files: List[str] = []
         for i, chunk in enumerate(byte_chunks):
-            if len(chunk) == 0:
+            # Skip pathological tiny chunks that cannot represent valid audio files
+            if len(chunk) < 2:
+                logger.debug("Skipping sub-2-byte stdin chunk (too small to be audio)")
                 continue
-                
+
             # Try to detect file format from magic bytes
             file_ext = detect_audio_format(chunk)
-            
+
             # Create temporary file
             temp_fd, temp_path = tempfile.mkstemp(suffix=file_ext)
             try:
                 os.write(temp_fd, chunk)
             finally:
                 os.close(temp_fd)
-            
+
             temp_files.append(temp_path)
             input_files.append(temp_path)
             logger.debug(f"Created temporary file {temp_path} ({len(chunk)} bytes, detected as {file_ext})")
-        
+
         # Store temp files for cleanup later
         setattr(pipeline, '_temp_files', temp_files)
     
